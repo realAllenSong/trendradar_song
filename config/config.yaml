@@ -13,7 +13,7 @@ app:
   #   - America/New_York (美东时间 UTC-5/-4)
   #   - Europe/London (伦敦时间 UTC+0/+1)
   # 完整时区列表: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
-  timezone: "Asia/Shanghai"
+  timezone: "America/New_York"
   show_version_update: true           # 显示版本更新提示
 
 
@@ -153,7 +153,7 @@ report:
 # • 邮箱已支持多收件人（逗号分隔）
 # ===============================================================
 notification:
-  enabled: true                       # 是否启用通知功能
+  enabled: false                      # 是否启用通知功能
 
   # 🕐 推送时间窗口控制（可选功能）
   # 用途：限制推送的时间范围，避免非工作时间打扰
