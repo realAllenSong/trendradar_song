@@ -43,7 +43,9 @@ def render_rss_html_content(
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>RSS 订阅内容</title>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Newsreader:wght@400;500;600;700&family=Public+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
         <style>
             * { box-sizing: border-box; }
             body {
@@ -287,14 +289,358 @@ def render_rss_html_content(
                     width: 100%;
                 }
             }
+
+            :root {
+                --bg: #f6f3ee;
+                --surface: #ffffff;
+                --surface-muted: #f1f5f9;
+                --border: #e7e5e4;
+                --ink: #0f172a;
+                --muted: #5b6472;
+                --accent: #059669;
+                --accent-strong: #047857;
+                --accent-warm: #f97316;
+                --danger: #dc2626;
+                --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.08);
+                --shadow-deep: 0 24px 60px rgba(15, 23, 42, 0.12);
+                --radius-lg: 18px;
+                --radius-xl: 26px;
+            }
+
+            body {
+                font-family: 'Public Sans', sans-serif;
+                background:
+                    radial-gradient(1200px 500px at -10% -10%, rgba(16, 185, 129, 0.18) 0%, transparent 55%),
+                    radial-gradient(1200px 600px at 110% -10%, rgba(59, 130, 246, 0.12) 0%, transparent 55%),
+                    var(--bg);
+                color: var(--ink);
+                line-height: 1.6;
+                padding: 20px;
+            }
+
+            .container {
+                max-width: 1120px;
+                margin: 0 auto 48px;
+                padding: 24px;
+                background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(248, 250, 252, 0.92) 100%);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-xl);
+                box-shadow: var(--shadow-deep);
+                overflow: visible;
+            }
+
+            .header {
+                background: linear-gradient(135deg, #ecfdf5 0%, #e0f2fe 55%, #eef2ff 100%);
+                color: var(--ink);
+                padding: 24px;
+                text-align: left;
+                border-radius: var(--radius-lg);
+                border: 1px solid rgba(15, 23, 42, 0.08);
+                overflow: hidden;
+                animation: fadeIn 0.6s ease both;
+            }
+
+            .header::before {
+                content: "";
+                position: absolute;
+                inset: -40% 60% auto auto;
+                width: 220px;
+                height: 220px;
+                background: radial-gradient(circle, rgba(16, 185, 129, 0.18), transparent 70%);
+                filter: blur(2px);
+            }
+
+            .header::after {
+                content: "";
+                position: absolute;
+                inset: auto auto -40% -10%;
+                width: 280px;
+                height: 280px;
+                background: radial-gradient(circle, rgba(59, 130, 246, 0.14), transparent 70%);
+                filter: blur(4px);
+            }
+
+            .save-buttons {
+                top: 18px;
+                right: 18px;
+                z-index: 1;
+            }
+
+            .save-btn {
+                background: var(--accent);
+                border: none;
+                color: white;
+                padding: 8px 14px;
+                border-radius: 999px;
+                cursor: pointer;
+                font-size: 12px;
+                font-weight: 600;
+                letter-spacing: 0.2px;
+                transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+                backdrop-filter: none;
+                box-shadow: 0 8px 20px rgba(5, 150, 105, 0.25);
+            }
+
+            .save-btn:hover {
+                transform: translateY(-1px);
+                box-shadow: 0 10px 24px rgba(5, 150, 105, 0.3);
+                border-color: transparent;
+            }
+
+            .header-title {
+                font-family: 'Newsreader', serif;
+                font-size: 30px;
+                font-weight: 600;
+                margin: 4px 0 16px 0;
+                position: relative;
+                z-index: 1;
+            }
+
+            .header-info {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+                gap: 12px;
+                font-size: 13px;
+                position: relative;
+                z-index: 1;
+            }
+
+            .info-item {
+                text-align: left;
+                background: rgba(255, 255, 255, 0.75);
+                border: 1px solid rgba(15, 23, 42, 0.08);
+                border-radius: 12px;
+                padding: 10px 12px;
+            }
+
+            .info-label {
+                font-size: 11px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                color: var(--muted);
+                margin-bottom: 6px;
+            }
+
+            .info-value {
+                font-weight: 600;
+                font-size: 16px;
+                color: var(--ink);
+            }
+
+            .content {
+                padding: 18px 0 0;
+            }
+
+            .bento-grid {
+                display: grid;
+                grid-template-columns: repeat(12, minmax(0, 1fr));
+                gap: 16px;
+            }
+
+            .bento-card {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-lg);
+                padding: 18px;
+                box-shadow: var(--shadow-soft);
+                position: relative;
+                animation: rise 0.6s ease both;
+                animation-delay: var(--delay, 0ms);
+            }
+
+            .span-12 { grid-column: span 12; }
+            .span-6 { grid-column: span 6; }
+
+            .feed-group {
+                margin-bottom: 0;
+            }
+
+            .feed-header {
+                margin-bottom: 10px;
+                padding-bottom: 8px;
+                border-bottom: 1px dashed #cbd5e1;
+            }
+
+            .feed-name {
+                font-size: 15px;
+                font-weight: 600;
+                color: var(--accent-strong);
+            }
+
+            .rss-item {
+                margin-bottom: 10px;
+                padding: 10px;
+                background: #f8fafc;
+                border-radius: 10px;
+                border-left: 3px solid #34d399;
+            }
+
+            .rss-item:last-child {
+                margin-bottom: 0;
+            }
+
+            .rss-title {
+                font-size: 15px;
+                color: var(--ink);
+            }
+
+            .rss-link {
+                color: var(--ink);
+                text-decoration: none;
+            }
+
+            .rss-link:hover {
+                color: var(--accent-strong);
+                text-decoration: underline;
+            }
+
+            .rss-link:visited {
+                color: #0f766e;
+            }
+
+            .rss-summary {
+                font-size: 12px;
+            }
+
+            .footer {
+                margin-top: 20px;
+                padding: 16px;
+                background: rgba(255, 255, 255, 0.9);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-lg);
+            }
+
+            .footer-content {
+                color: var(--muted);
+            }
+
+            .footer-link {
+                color: var(--accent);
+            }
+
+            .project-name {
+                color: var(--ink);
+            }
+
+            .preview-modal {
+                position: fixed;
+                inset: 0;
+                background: rgba(15, 23, 42, 0.5);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+                z-index: 2000;
+            }
+
+            .preview-modal.show {
+                display: flex;
+            }
+
+            .preview-dialog {
+                background: white;
+                border-radius: 18px;
+                max-width: 960px;
+                width: 100%;
+                max-height: 90vh;
+                overflow: hidden;
+                box-shadow: 0 30px 80px rgba(15, 23, 42, 0.35);
+                display: flex;
+                flex-direction: column;
+            }
+
+            .preview-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 16px 20px;
+                border-bottom: 1px solid #e2e8f0;
+            }
+
+            .preview-title {
+                font-family: 'Newsreader', serif;
+                font-size: 18px;
+                color: var(--ink);
+            }
+
+            .preview-close {
+                background: transparent;
+                border: none;
+                color: var(--muted);
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            .preview-body {
+                padding: 16px;
+                overflow: auto;
+                background: #f8fafc;
+            }
+
+            .preview-body img {
+                width: 100%;
+                height: auto;
+                border-radius: 12px;
+                border: 1px solid #e2e8f0;
+            }
+
+            .preview-footer {
+                padding: 16px 20px;
+                border-top: 1px solid #e2e8f0;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+
+            .preview-filename {
+                font-size: 12px;
+                color: var(--muted);
+            }
+
+            .preview-actions {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+
+            .modal-open {
+                overflow: hidden;
+            }
+
+            @keyframes rise {
+                from { opacity: 0; transform: translateY(12px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(8px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            @media (max-width: 960px) {
+                .span-6 { grid-column: span 12; }
+            }
+
+            @media (max-width: 640px) {
+                body { padding: 12px; }
+                .container { padding: 16px; }
+                .header { padding: 20px; }
+                .header-title { font-size: 24px; }
+                .save-buttons {
+                    position: static;
+                    margin-bottom: 12px;
+                    flex-direction: column;
+                    align-items: stretch;
+                }
+                .save-btn { width: 100%; }
+                .header-info { grid-template-columns: 1fr; }
+            }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="save-buttons">
-                    <button class="save-btn" onclick="saveAsImage()">保存为图片</button>
-                </div>
                 <div class="header-title">RSS 订阅内容</div>
                 <div class="header-info">
                     <div class="info-item">
@@ -321,7 +667,8 @@ def render_rss_html_content(
                 </div>
             </div>
 
-            <div class="content">"""
+            <div class="content">
+                <div class="bento-grid">"""
 
     # 按 feed_id 分组
     feeds_map: Dict[str, List[Dict]] = {}
@@ -332,15 +679,16 @@ def render_rss_html_content(
         feeds_map[feed_id].append(item)
 
     # 渲染每个 RSS 源的内容
-    for feed_id, items in feeds_map.items():
+    for index, (feed_id, items) in enumerate(feeds_map.items(), 1):
         feed_name = items[0].get("feed_name", feed_id) if items else feed_id
         if feeds_info and feed_id in feeds_info:
             feed_name = feeds_info[feed_id]
 
         escaped_feed_name = html_escape(feed_name)
 
+        delay_ms = min(index - 1, 6) * 60
         html += f"""
-                <div class="feed-group">
+                <div class="feed-group bento-card span-6" style="--delay: {delay_ms}ms;">
                     <div class="feed-header">
                         <div class="feed-name">{escaped_feed_name}</div>
                         <div class="feed-count">{len(items)} 条</div>
@@ -388,6 +736,7 @@ def render_rss_html_content(
                 </div>"""
 
     html += """
+                </div>
             </div>
 
             <div class="footer">
@@ -399,79 +748,6 @@ def render_rss_html_content(
                 </div>
             </div>
         </div>
-
-        <script>
-            async function saveAsImage() {
-                const button = event.target;
-                const originalText = button.textContent;
-
-                try {
-                    button.textContent = '生成中...';
-                    button.disabled = true;
-                    window.scrollTo(0, 0);
-
-                    await new Promise(resolve => setTimeout(resolve, 200));
-
-                    const buttons = document.querySelector('.save-buttons');
-                    buttons.style.visibility = 'hidden';
-
-                    await new Promise(resolve => setTimeout(resolve, 100));
-
-                    const container = document.querySelector('.container');
-
-                    const canvas = await html2canvas(container, {
-                        backgroundColor: '#ffffff',
-                        scale: 1.5,
-                        useCORS: true,
-                        allowTaint: false,
-                        imageTimeout: 10000,
-                        removeContainer: false,
-                        foreignObjectRendering: false,
-                        logging: false,
-                        width: container.offsetWidth,
-                        height: container.offsetHeight,
-                        x: 0,
-                        y: 0,
-                        scrollX: 0,
-                        scrollY: 0,
-                        windowWidth: window.innerWidth,
-                        windowHeight: window.innerHeight
-                    });
-
-                    buttons.style.visibility = 'visible';
-
-                    const link = document.createElement('a');
-                    const now = new Date();
-                    const filename = `TrendRadar_RSS订阅_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}.png`;
-
-                    link.download = filename;
-                    link.href = canvas.toDataURL('image/png', 1.0);
-
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-
-                    button.textContent = '保存成功!';
-                    setTimeout(() => {
-                        button.textContent = originalText;
-                        button.disabled = false;
-                    }, 2000);
-
-                } catch (error) {
-                    const buttons = document.querySelector('.save-buttons');
-                    buttons.style.visibility = 'visible';
-                    button.textContent = '保存失败';
-                    setTimeout(() => {
-                        button.textContent = originalText;
-                        button.disabled = false;
-                    }, 2000);
-                }
-            }
-
-            document.addEventListener('DOMContentLoaded', function() {
-                window.scrollTo(0, 0);
-            });
-        </script>
     </body>
     </html>
     """

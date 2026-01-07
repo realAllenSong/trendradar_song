@@ -6,9 +6,130 @@ HTML 报告渲染模块
 """
 
 from datetime import datetime
+import json
+import os
+from pathlib import Path
+import re
+import time
 from typing import Dict, List, Optional, Callable
+from urllib.parse import urljoin
+
+import requests
 
 from trendradar.report.helpers import html_escape
+
+_PREVIEW_CACHE_PATH = Path("output") / "preview_cache.json"
+_PREVIEW_CACHE_TTL_SECONDS = 60 * 60 * 24 * 7
+_PREVIEW_FETCH_LIMIT = int(os.environ.get("PREVIEW_IMAGE_LIMIT", "80"))
+_PREVIEW_FETCH_TIMEOUT = float(os.environ.get("PREVIEW_IMAGE_TIMEOUT", "5"))
+_PLACEHOLDER_IMAGE_DATA_URI = (
+    "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI2NDAiIGhlaWdodD0iMzYwIiB2aWV3Qm94PSIwIDAgNjQwIDM2MCI+CiAgPGRlZnM+CiAgICA8bGluZWFyR3JhZGllbnQgaWQ9ImciIHgxPSIwIiB5MT0iMCIgeDI9IjEiIHkyPSIxIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iI2UwZjJmZSIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiNmZmY3ZWQiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDxyZWN0IHdpZHRoPSI2NDAiIGhlaWdodD0iMzYwIiBmaWxsPSJ1cmwoI2cpIi8+CiAgPHJlY3QgeD0iNDgiIHk9IjU2IiB3aWR0aD0iNTQ0IiBoZWlnaHQ9IjI0OCIgcng9IjMyIiBmaWxsPSIjZmZmZmZmIiBvcGFjaXR5PSIwLjYiLz4KICA8Y2lyY2xlIGN4PSIxOTAiIGN5PSIxODAiIHI9IjY4IiBmaWxsPSIjYmZkYmZlIi8+CiAgPHJlY3QgeD0iMjkwIiB5PSIxMzIiIHdpZHRoPSIyMjAiIGhlaWdodD0iMjgiIHJ4PSIxNCIgZmlsbD0iIzkzYzVmZCIvPgogIDxyZWN0IHg9IjI5MCIgeT0iMTc2IiB3aWR0aD0iMTgwIiBoZWlnaHQ9IjIwIiByeD0iMTAiIGZpbGw9IiNjYmQ1ZjUiLz4KICA8cmVjdCB4PSIyOTAiIHk9IjIxMCIgd2lkdGg9IjE0MCIgaGVpZ2h0PSIxNiIgcng9IjgiIGZpbGw9IiNlMmU4ZjAiLz4KPC9zdmc+"
+)
+
+_META_IMAGE_PATTERNS = [
+    re.compile(
+        r'<meta[^>]+property=["\']og:image(?::secure_url)?["\'][^>]+content=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:image(?::secure_url)?["\']',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<meta[^>]+name=["\']twitter:image(?::src)?["\'][^>]+content=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+name=["\']twitter:image(?::src)?["\']',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<link[^>]+rel=["\']image_src["\'][^>]+href=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ),
+]
+
+
+def _load_preview_cache() -> Dict[str, Dict[str, str]]:
+    if not _PREVIEW_CACHE_PATH.exists():
+        return {}
+    try:
+        with open(_PREVIEW_CACHE_PATH, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+            if isinstance(data, dict):
+                return data
+    except Exception:
+        return {}
+    return {}
+
+
+def _save_preview_cache(cache: Dict[str, Dict[str, str]]) -> None:
+    try:
+        _PREVIEW_CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(_PREVIEW_CACHE_PATH, "w", encoding="utf-8") as handle:
+            json.dump(cache, handle)
+    except Exception:
+        return
+
+
+def _extract_preview_image(html: str, base_url: str) -> Optional[str]:
+    for pattern in _META_IMAGE_PATTERNS:
+        match = pattern.search(html)
+        if not match:
+            continue
+        raw_url = match.group(1).strip()
+        if not raw_url:
+            continue
+        if raw_url.startswith("data:"):
+            continue
+        return urljoin(base_url, raw_url)
+    return None
+
+
+def _fetch_preview_image(session: requests.Session, url: str) -> Optional[str]:
+    try:
+        response = session.get(url, timeout=_PREVIEW_FETCH_TIMEOUT, stream=True)
+        response.raise_for_status()
+        content_type = response.headers.get("Content-Type", "")
+        if "text/html" not in content_type:
+            return None
+        chunks = []
+        max_bytes = 200_000
+        total = 0
+        for chunk in response.iter_content(chunk_size=4096):
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total >= max_bytes:
+                break
+        html = b"".join(chunks).decode("utf-8", errors="ignore")
+        return _extract_preview_image(html, url)
+    except Exception:
+        return None
+
+
+def _get_preview_image(
+    url: str,
+    session: requests.Session,
+    cache: Dict[str, Dict[str, str]],
+    quota: Dict[str, int],
+) -> Optional[str]:
+    now = int(time.time())
+    cached = cache.get(url)
+    if cached:
+        cached_at = int(cached.get("ts", "0") or 0)
+        if now - cached_at < _PREVIEW_CACHE_TTL_SECONDS:
+            image = cached.get("image", "")
+            return image or None
+
+    if quota["remaining"] <= 0:
+        return None
+
+    quota["remaining"] -= 1
+    image_url = _fetch_preview_image(session, url)
+    cache[url] = {"image": image_url or "", "ts": str(now)}
+    return image_url
 
 
 def render_html_content(
@@ -41,6 +162,14 @@ def render_html_content(
     Returns:
         渲染后的 HTML 字符串
     """
+    preview_cache = _load_preview_cache()
+    preview_quota = {"remaining": _PREVIEW_FETCH_LIMIT}
+    preview_session = requests.Session()
+    preview_session.headers.update(
+        {"User-Agent": "TrendRadarBot/1.0 (+https://github.com/sansan0/TrendRadar)"}
+    )
+    placeholder_image = _PLACEHOLDER_IMAGE_DATA_URI
+    escaped_placeholder_image = html_escape(placeholder_image)
     html = """
     <!DOCTYPE html>
     <html>
@@ -48,7 +177,9 @@ def render_html_content(
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <title>热点新闻分析</title>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js" integrity="sha512-BNaRQnYJYiPSqHHDb58B0yaPfCu+Wgds8Gp/gU33kqBtgNS4tSPHuGibyoeqMV/TJlSKda6FXzoEyYGjTe+vXA==" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+        <link rel="preconnect" href="https://fonts.googleapis.com">
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+        <link href="https://fonts.googleapis.com/css2?family=Newsreader:wght@400;500;600;700&family=Public+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet">
         <style>
             * { box-sizing: border-box; }
             body {
@@ -592,20 +723,838 @@ def render_html_content(
                 -webkit-box-orient: vertical;
                 overflow: hidden;
             }
+
+            :root {
+                --bg: #f6f3ee;
+                --surface: #ffffff;
+                --surface-muted: #f1f5f9;
+                --surface-warm: #fff7ed;
+                --border: #e7e5e4;
+                --ink: #0f172a;
+                --muted: #5b6472;
+                --accent: #2563eb;
+                --accent-strong: #1d4ed8;
+                --accent-warm: #f97316;
+                --success: #16a34a;
+                --danger: #dc2626;
+                --shadow-soft: 0 10px 30px rgba(15, 23, 42, 0.08);
+                --shadow-deep: 0 24px 60px rgba(15, 23, 42, 0.12);
+                --radius-lg: 18px;
+                --radius-xl: 26px;
+            }
+
+            body {
+                font-family: 'Public Sans', sans-serif;
+                background:
+                    radial-gradient(1200px 500px at -10% -10%, rgba(251, 191, 36, 0.18) 0%, transparent 55%),
+                    radial-gradient(1200px 600px at 110% -10%, rgba(59, 130, 246, 0.18) 0%, transparent 55%),
+                    var(--bg);
+                color: var(--ink);
+                line-height: 1.6;
+                padding: 12px;
+            }
+
+            .container {
+                max-width: none;
+                width: 100%;
+                margin: 0 auto 32px;
+                padding: 16px 20px 20px;
+                background: linear-gradient(180deg, rgba(255, 255, 255, 0.9) 0%, rgba(248, 250, 252, 0.92) 100%);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-xl);
+                box-shadow: var(--shadow-deep);
+                overflow: visible;
+            }
+
+            .header {
+                background: linear-gradient(135deg, #fff7ed 0%, #e0f2fe 50%, #eef2ff 100%);
+                color: var(--ink);
+                padding: 18px;
+                text-align: left;
+                border-radius: var(--radius-lg);
+                border: 1px solid rgba(15, 23, 42, 0.08);
+                overflow: hidden;
+                display: grid;
+                grid-template-columns: 1fr;
+                gap: 8px;
+                align-items: start;
+                animation: fadeIn 0.6s ease both;
+            }
+
+            .header::before {
+                content: "";
+                position: absolute;
+                inset: -40% 60% auto auto;
+                width: 220px;
+                height: 220px;
+                background: radial-gradient(circle, rgba(59, 130, 246, 0.18), transparent 70%);
+                filter: blur(2px);
+            }
+
+            .header::after {
+                content: "";
+                position: absolute;
+                inset: auto auto -40% -10%;
+                width: 280px;
+                height: 280px;
+                background: radial-gradient(circle, rgba(249, 115, 22, 0.18), transparent 70%);
+                filter: blur(4px);
+            }
+
+            .header-title {
+                font-family: 'Newsreader', serif;
+                font-size: 26px;
+                font-weight: 600;
+                margin: 4px 0 0 0;
+                position: relative;
+                z-index: 1;
+            }
+
+            .header-main {
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+                position: relative;
+                z-index: 1;
+            }
+
+            .header-info {
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 8px;
+                font-size: 12px;
+                position: relative;
+                z-index: 1;
+            }
+
+            .info-item {
+                text-align: left;
+                background: rgba(255, 255, 255, 0.75);
+                border: 1px solid rgba(15, 23, 42, 0.08);
+                border-radius: 10px;
+                padding: 8px 10px;
+            }
+
+            .info-label {
+                font-size: 11px;
+                letter-spacing: 0.12em;
+                text-transform: uppercase;
+                color: var(--muted);
+                margin-bottom: 4px;
+            }
+
+            .info-value {
+                font-weight: 600;
+                font-size: 14px;
+                color: var(--ink);
+            }
+
+            .content {
+                padding: 12px 0 0;
+            }
+
+            .bento-grid {
+                display: grid;
+                grid-template-columns: repeat(12, minmax(0, 1fr));
+                gap: 12px;
+            }
+
+            .bento-card {
+                background: var(--surface);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-lg);
+                padding: 12px;
+                box-shadow: var(--shadow-soft);
+                position: relative;
+                animation: rise 0.6s ease both;
+                animation-delay: var(--delay, 0ms);
+            }
+
+            .span-12 { grid-column: span 12; }
+            .span-6 { grid-column: span 6; }
+
+            .word-group {
+                margin-bottom: 0;
+            }
+
+            .word-header {
+                margin-bottom: 8px;
+                padding-bottom: 6px;
+                border-bottom: 1px dashed var(--border);
+            }
+
+            .word-name {
+                font-family: 'Newsreader', serif;
+                font-size: 16px;
+            }
+
+            .word-count {
+                background: #eff6ff;
+                border: 1px solid #dbeafe;
+                color: #1d4ed8;
+                font-size: 10px;
+                padding: 2px 6px;
+                border-radius: 999px;
+            }
+
+            .word-count.hot {
+                background: #fee2e2;
+                border-color: #fecaca;
+                color: var(--danger);
+            }
+
+            .word-count.warm {
+                background: #ffedd5;
+                border-color: #fed7aa;
+                color: var(--accent-warm);
+            }
+
+            .word-index {
+                color: var(--muted);
+                font-size: 10px;
+                border: 1px solid rgba(15, 23, 42, 0.12);
+                border-radius: 999px;
+                padding: 2px 6px;
+            }
+
+            .news-grid {
+                display: grid;
+                grid-template-columns: repeat(4, minmax(0, 1fr));
+                gap: 10px;
+            }
+
+            .news-card {
+                background: var(--surface);
+                border: 1px solid #e2e8f0;
+                border-radius: 12px;
+                padding: 8px;
+                display: grid;
+                grid-template-rows: 104px 1fr;
+                gap: 6px;
+                text-decoration: none;
+                color: var(--ink);
+                position: relative;
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+                height: 220px;
+                overflow: hidden;
+                animation: fadeIn 0.6s ease both;
+                animation-delay: var(--delay, 0ms);
+            }
+
+            .news-card.is-link {
+                cursor: pointer;
+            }
+
+            .news-card:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+            }
+
+            .news-card.new::after {
+                content: "NEW";
+                position: absolute;
+                top: 10px;
+                right: 12px;
+                background: var(--accent-warm);
+                color: white;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 6px;
+                border-radius: 999px;
+                letter-spacing: 0.4px;
+            }
+
+            .news-card-media {
+                border-radius: 12px;
+                overflow: hidden;
+                height: 100%;
+                background: linear-gradient(135deg, rgba(224, 242, 254, 0.9), rgba(255, 247, 237, 0.9));
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                position: relative;
+            }
+
+            .news-card-media img {
+                width: 100%;
+                height: 100%;
+                object-fit: cover;
+                display: block;
+            }
+
+            .news-card-body {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+                min-height: 0;
+            }
+
+            .news-meta {
+                display: flex;
+                flex-wrap: wrap;
+                gap: 4px;
+                align-items: center;
+            }
+
+            .news-number {
+                color: #475569;
+                font-size: 10px;
+                font-weight: 700;
+                min-width: 20px;
+                text-align: center;
+                background: #e2e8f0;
+                border-radius: 999px;
+                width: 20px;
+                height: 20px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .news-title {
+                font-size: 13px;
+                line-height: 1.4;
+                color: var(--ink);
+                font-weight: 600;
+                display: -webkit-box;
+                -webkit-line-clamp: 2;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+
+            .news-card-footer {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                font-size: 10px;
+                color: var(--muted);
+                margin-top: auto;
+            }
+
+            .news-item {
+                margin-bottom: 0;
+                padding: 14px 0;
+                border-top: 1px solid #e2e8f0;
+                display: grid;
+                grid-template-columns: 32px minmax(0, 1fr) minmax(220px, 0.35fr);
+                gap: 16px;
+                align-items: stretch;
+                position: relative;
+            }
+
+            .word-group .news-item:first-of-type {
+                border-top: none;
+                padding-top: 0;
+            }
+
+            .news-item.new {
+                background: var(--surface-warm);
+                border: 1px solid #fed7aa;
+                border-radius: 12px;
+                padding: 10px;
+                margin-top: 10px;
+            }
+
+            .news-item.new::after {
+                content: "NEW";
+                position: absolute;
+                top: 10px;
+                right: 12px;
+                background: var(--accent-warm);
+                color: white;
+                font-size: 10px;
+                font-weight: 700;
+                padding: 2px 6px;
+                border-radius: 999px;
+                letter-spacing: 0.4px;
+            }
+
+            .news-number {
+                color: #475569;
+                font-size: 11px;
+                font-weight: 700;
+                min-width: 22px;
+                text-align: center;
+                background: #e2e8f0;
+                border-radius: 999px;
+                width: 22px;
+                height: 22px;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+            }
+
+            .news-content {
+                padding-right: 0;
+            }
+
+            .news-item.new .news-content {
+                padding-right: 0;
+            }
+
+            .news-header {
+                display: flex;
+                align-items: center;
+                gap: 6px;
+                margin-bottom: 8px;
+                flex-wrap: wrap;
+            }
+
+            .source-name,
+            .keyword-tag,
+            .rank-num,
+            .time-info,
+            .count-info {
+                display: inline-flex;
+                align-items: center;
+                gap: 4px;
+                padding: 2px 6px;
+                border-radius: 999px;
+                font-size: 10px;
+                font-weight: 600;
+            }
+
+            .source-name {
+                color: #475569;
+                background: #f1f5f9;
+                border: 1px solid #e2e8f0;
+            }
+
+            .keyword-tag {
+                color: #1d4ed8;
+                background: #eff6ff;
+                border: 1px solid #dbeafe;
+            }
+
+            .rank-num {
+                color: white;
+                background: #1f2937;
+            }
+
+            .rank-num.top { background: var(--danger); }
+            .rank-num.high { background: var(--accent-warm); }
+
+            .time-info {
+                color: var(--muted);
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                font-weight: 500;
+            }
+
+            .count-info {
+                color: #15803d;
+                background: #ecfdf3;
+                border: 1px solid #bbf7d0;
+                font-weight: 600;
+            }
+
+            .news-title {
+                font-size: 15px;
+                line-height: 1.5;
+                color: var(--ink);
+                font-weight: 600;
+                display: -webkit-box;
+                -webkit-line-clamp: 3;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+
+            .news-link {
+                color: var(--accent-strong);
+                text-decoration: none;
+            }
+
+            .news-link:hover {
+                text-decoration: underline;
+                color: var(--accent);
+            }
+
+            .news-link:visited {
+                color: #0f766e;
+            }
+
+            .news-preview {
+                background: linear-gradient(135deg, rgba(224, 242, 254, 0.9), rgba(255, 247, 237, 0.9));
+                border: 1px solid #e2e8f0;
+                border-radius: 14px;
+                padding: 12px 14px;
+                display: flex;
+                flex-direction: column;
+                justify-content: space-between;
+                gap: 10px;
+                color: var(--ink);
+                text-decoration: none;
+                transition: transform 0.2s ease, box-shadow 0.2s ease;
+            }
+
+            .news-preview:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12);
+            }
+
+            .news-preview-label {
+                font-size: 11px;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                color: var(--muted);
+            }
+
+            .news-preview-text {
+                font-size: 13px;
+                line-height: 1.4;
+                color: var(--ink);
+                display: -webkit-box;
+                -webkit-line-clamp: 3;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+            }
+
+            .news-preview-footer {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                font-size: 11px;
+                color: var(--muted);
+            }
+
+            .news-preview-pill {
+                background: rgba(37, 99, 235, 0.12);
+                color: var(--accent-strong);
+                border-radius: 999px;
+                padding: 2px 8px;
+                font-weight: 600;
+            }
+
+            .new-section {
+                margin-top: 0;
+                padding-top: 0;
+                border-top: none;
+            }
+
+            .new-section-title {
+                color: var(--ink);
+                font-size: 18px;
+                font-family: 'Newsreader', serif;
+                margin: 0 0 16px 0;
+            }
+
+            .new-source-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: 16px;
+            }
+
+            .new-source-group {
+                margin-bottom: 0;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 14px;
+                padding: 12px;
+            }
+
+            .new-source-title {
+                color: var(--muted);
+                font-size: 12px;
+                letter-spacing: 0.08em;
+                text-transform: uppercase;
+                margin: 0 0 10px 0;
+                border-bottom: 1px dashed #e2e8f0;
+                padding-bottom: 6px;
+            }
+
+            .new-item {
+                display: grid;
+                align-items: center;
+                grid-template-columns: auto auto 1fr;
+                gap: 10px;
+                padding: 8px 0;
+                border-bottom: 1px dashed #e2e8f0;
+            }
+
+            .new-item:last-child {
+                border-bottom: none;
+            }
+
+            .new-item-number {
+                color: #475569;
+                background: #e2e8f0;
+                width: 20px;
+                height: 20px;
+                border-radius: 999px;
+                font-size: 11px;
+            }
+
+            .new-item-rank {
+                background: #1f2937;
+                font-size: 10px;
+                padding: 2px 6px;
+                border-radius: 999px;
+            }
+
+            .new-item-rank.top { background: var(--danger); }
+            .new-item-rank.high { background: var(--accent-warm); }
+
+            .new-item-title {
+                font-size: 13px;
+                color: var(--ink);
+            }
+
+            .error-section {
+                background: #fef2f2;
+                border: 1px solid #fecaca;
+                padding: 16px;
+                margin-bottom: 0;
+            }
+
+            .error-title {
+                color: var(--danger);
+                font-size: 14px;
+                font-weight: 700;
+                margin: 0 0 8px 0;
+            }
+
+            .rss-section {
+                margin-top: 0;
+                padding-top: 0;
+                border-top: none;
+            }
+
+            .rss-section-header {
+                margin-bottom: 16px;
+            }
+
+            .rss-section-title {
+                font-size: 18px;
+                font-family: 'Newsreader', serif;
+                color: var(--accent-strong);
+            }
+
+            .rss-section-count {
+                color: var(--muted);
+            }
+
+            .rss-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: 16px;
+            }
+
+            .feed-group {
+                margin-bottom: 0;
+                background: #f8fafc;
+                border: 1px solid #e2e8f0;
+                border-radius: 14px;
+                padding: 12px;
+            }
+
+            .feed-header {
+                border-bottom: 1px dashed #cbd5f5;
+                padding-bottom: 8px;
+                margin-bottom: 10px;
+            }
+
+            .feed-name {
+                font-size: 14px;
+                color: var(--accent-strong);
+            }
+
+            .rss-item {
+                margin-bottom: 10px;
+                padding: 10px;
+                background: white;
+                border-radius: 10px;
+                border-left: 3px solid #38bdf8;
+            }
+
+            .rss-item:last-child {
+                margin-bottom: 0;
+            }
+
+            .rss-meta {
+                gap: 8px;
+                margin-bottom: 6px;
+            }
+
+            .rss-link {
+                color: var(--ink);
+            }
+
+            .rss-link:hover {
+                color: var(--accent-strong);
+            }
+
+            .rss-summary {
+                font-size: 12px;
+            }
+
+            .footer {
+                margin-top: 20px;
+                padding: 16px;
+                background: rgba(255, 255, 255, 0.9);
+                border: 1px solid var(--border);
+                border-radius: var(--radius-lg);
+            }
+
+            .footer-content {
+                color: var(--muted);
+            }
+
+            .footer-link {
+                color: var(--accent);
+            }
+
+            .project-name {
+                color: var(--ink);
+            }
+
+            .preview-modal {
+                position: fixed;
+                inset: 0;
+                background: rgba(15, 23, 42, 0.5);
+                display: none;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+                z-index: 2000;
+            }
+
+            .preview-modal.show {
+                display: flex;
+            }
+
+            .preview-dialog {
+                background: white;
+                border-radius: 18px;
+                max-width: 960px;
+                width: 100%;
+                max-height: 90vh;
+                overflow: hidden;
+                box-shadow: 0 30px 80px rgba(15, 23, 42, 0.35);
+                display: flex;
+                flex-direction: column;
+            }
+
+            .preview-header {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                padding: 16px 20px;
+                border-bottom: 1px solid #e2e8f0;
+            }
+
+            .preview-title {
+                font-family: 'Newsreader', serif;
+                font-size: 18px;
+                color: var(--ink);
+            }
+
+            .preview-close {
+                background: transparent;
+                border: none;
+                color: var(--muted);
+                font-weight: 600;
+                cursor: pointer;
+            }
+
+            .preview-body {
+                padding: 16px;
+                overflow: auto;
+                background: #f8fafc;
+            }
+
+            .preview-body img {
+                width: 100%;
+                height: auto;
+                border-radius: 12px;
+                border: 1px solid #e2e8f0;
+            }
+
+            .preview-footer {
+                padding: 16px 20px;
+                border-top: 1px solid #e2e8f0;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                flex-wrap: wrap;
+            }
+
+            .preview-filename {
+                font-size: 12px;
+                color: var(--muted);
+            }
+
+            .preview-actions {
+                display: flex;
+                gap: 8px;
+                align-items: center;
+            }
+
+            .modal-open {
+                overflow: hidden;
+            }
+
+            @keyframes rise {
+                from { opacity: 0; transform: translateY(12px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(8px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            @media (prefers-reduced-motion: reduce) {
+                * {
+                    animation: none !important;
+                    transition: none !important;
+                }
+            }
+
+            @media (max-width: 1200px) {
+                .span-6 { grid-column: span 12; }
+                .header { grid-template-columns: 1fr; }
+                .header-info { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                .news-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            }
+
+            @media (max-width: 960px) {
+                .header-info { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+                .news-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            }
+
+            @media (max-width: 640px) {
+                body { padding: 10px; }
+                .container { padding: 14px; }
+                .header { padding: 16px; }
+                .header-title { font-size: 24px; }
+                .header-info { grid-template-columns: 1fr; }
+                .news-grid {
+                    grid-template-columns: repeat(2, minmax(0, 1fr));
+                    gap: 10px;
+                }
+                .news-card {
+                    height: 210px;
+                }
+            }
+
+            @media (max-width: 520px) {
+                .news-grid {
+                    grid-template-columns: 1fr;
+                }
+                .news-card { height: 210px; }
+            }
         </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
-                <div class="save-buttons">
-                    <button class="save-btn" onclick="saveAsImage()">保存为图片</button>
-                    <button class="save-btn" onclick="saveAsMultipleImages()">分段保存</button>
-                </div>
-                <div class="header-title">热点新闻分析</div>
-                <div class="header-info">
-                    <div class="info-item">
-                        <span class="info-label">报告类型</span>
-                        <span class="info-value">"""
+                <div class="header-main">
+                    <div class="header-title">热点新闻分析</div>
+                    <div class="header-info">
+                        <div class="info-item">
+                            <span class="info-label">报告类型</span>
+                            <span class="info-value">"""
 
     # 处理报告类型显示
     if is_daily_summary:
@@ -654,14 +1603,16 @@ def render_html_content(
                     </div>
                 </div>
             </div>
+            </div>
 
-            <div class="content">"""
+            <div class="content">
+                <div class="bento-grid">"""
 
     # 处理失败ID错误信息
     if report_data["failed_ids"]:
         html += """
-                <div class="error-section">
-                    <div class="error-title">⚠️ 请求失败的平台</div>
+                <div class="error-section bento-card span-12" style="--delay: 60ms;" role="alert">
+                    <div class="error-title">请求失败的平台</div>
                     <ul class="error-list">"""
         for id_value in report_data["failed_ids"]:
             html += f'<li class="error-item">{html_escape(id_value)}</li>'
@@ -687,45 +1638,88 @@ def render_html_content(
 
             escaped_word = html_escape(stat["word"])
 
+            span_class = "span-12"
+            delay_ms = min(i - 1, 6) * 60
+
             stats_html += f"""
-                <div class="word-group">
+                <div class="word-group bento-card {span_class}" style="--delay: {delay_ms}ms;">
                     <div class="word-header">
                         <div class="word-info">
                             <div class="word-name">{escaped_word}</div>
                             <div class="word-count {count_class}">{count} 条</div>
                         </div>
                         <div class="word-index">{i}/{total_count}</div>
-                    </div>"""
+                    </div>
+                    <div class="news-grid">"""
 
             # 处理每个词组下的新闻标题，给每条新闻标上序号
             for j, title_data in enumerate(stat["titles"], 1):
                 is_new = title_data.get("is_new", False)
-                new_class = "new" if is_new else ""
+                link_url = title_data.get("mobile_url") or title_data.get("url", "")
+                escaped_title = html_escape(title_data["title"])
+                escaped_url = html_escape(link_url) if link_url else ""
 
-                stats_html += f"""
-                    <div class="news-item {new_class}">
-                        <div class="news-number">{j}</div>
-                        <div class="news-content">
-                            <div class="news-header">"""
+                preview_label_raw = title_data.get("source_name", "")
+                preview_domain = ""
+                if link_url and "://" in link_url:
+                    preview_domain = link_url.split("/")[2]
+                if preview_domain:
+                    preview_label_raw = preview_domain
 
-                # 根据 display_mode 决定显示来源还是关键词
+                preview_label = html_escape(preview_label_raw) if preview_label_raw else ""
+
+                simplified_time = ""
+                time_display = title_data.get("time_display", "")
+                if time_display:
+                    simplified_time = (
+                        time_display.replace(" ~ ", "~")
+                        .replace("[", "")
+                        .replace("]", "")
+                    )
+
+                preview_time = html_escape(simplified_time) if simplified_time else "更新中"
+
+                preview_image = None
+                if link_url:
+                    preview_image = _get_preview_image(
+                        link_url, preview_session, preview_cache, preview_quota
+                    )
+
+                image_src = preview_image or placeholder_image
+                escaped_image_src = html_escape(image_src)
+                image_html = (
+                    f'<img src="{escaped_image_src}" alt="{escaped_title}" loading="lazy" '
+                    f'decoding="async" referrerpolicy="no-referrer" '
+                    f'onerror="this.src=\'{escaped_placeholder_image}\'; this.onerror=null;">'
+                )
+
+                card_classes = ["news-card"]
+                if link_url:
+                    card_classes.append("is-link")
+                if is_new:
+                    card_classes.append("new")
+
+                card_class_text = " ".join(card_classes)
+                card_delay = min(j - 1, 9) * 40
+
+                meta_items = [f'<span class="news-number">{j}</span>']
                 if display_mode == "keyword":
-                    # keyword 模式：显示来源
-                    stats_html += f'<span class="source-name">{html_escape(title_data["source_name"])}</span>'
+                    meta_items.append(
+                        f'<span class="source-name">{html_escape(title_data["source_name"])}</span>'
+                    )
                 else:
-                    # platform 模式：显示关键词
                     matched_keyword = title_data.get("matched_keyword", "")
                     if matched_keyword:
-                        stats_html += f'<span class="keyword-tag">[{html_escape(matched_keyword)}]</span>'
+                        meta_items.append(
+                            f'<span class="keyword-tag">[{html_escape(matched_keyword)}]</span>'
+                        )
 
-                # 处理排名显示
                 ranks = title_data.get("ranks", [])
                 if ranks:
                     min_rank = min(ranks)
                     max_rank = max(ranks)
                     rank_threshold = title_data.get("rank_threshold", 10)
 
-                    # 确定排名等级
                     if min_rank <= 3:
                         rank_class = "top"
                     elif min_rank <= rank_threshold:
@@ -738,54 +1732,57 @@ def render_html_content(
                     else:
                         rank_text = f"{min_rank}-{max_rank}"
 
-                    stats_html += f'<span class="rank-num {rank_class}">{rank_text}</span>'
+                    meta_items.append(f'<span class="rank-num {rank_class}">{rank_text}</span>')
 
-                # 处理时间显示
-                time_display = title_data.get("time_display", "")
-                if time_display:
-                    # 简化时间显示格式，将波浪线替换为~
-                    simplified_time = (
-                        time_display.replace(" ~ ", "~")
-                        .replace("[", "")
-                        .replace("]", "")
-                    )
-                    stats_html += (
+                if simplified_time:
+                    meta_items.append(
                         f'<span class="time-info">{html_escape(simplified_time)}</span>'
                     )
 
-                # 处理出现次数
                 count_info = title_data.get("count", 1)
                 if count_info > 1:
-                    stats_html += f'<span class="count-info">{count_info}次</span>'
+                    meta_items.append(f'<span class="count-info">{count_info}次</span>')
 
-                stats_html += """
+                meta_html = "\n                                    ".join(meta_items)
+                footer_label = preview_label or html_escape(title_data.get("source_name", "")) or "来源"
+
+                card_inner_html = f"""
+                        <div class="news-card-media">
+                            {image_html}
+                        </div>
+                        <div class="news-card-body">
+                            <div class="news-meta">
+                                {meta_html}
                             </div>
-                            <div class="news-title">"""
-
-                # 处理标题和链接
-                escaped_title = html_escape(title_data["title"])
-                link_url = title_data.get("mobile_url") or title_data.get("url", "")
+                            <div class="news-title">{escaped_title}</div>
+                            <div class="news-card-footer">
+                                <span>{footer_label}</span>
+                                <span>{preview_time}</span>
+                            </div>
+                        </div>"""
 
                 if link_url:
-                    escaped_url = html_escape(link_url)
-                    stats_html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
+                    stats_html += f"""
+                    <a class="{card_class_text}" href="{escaped_url}" target="_blank" rel="noopener" style="--delay: {card_delay}ms;">
+                        {card_inner_html}
+                    </a>"""
                 else:
-                    stats_html += escaped_title
-
-                stats_html += """
-                            </div>
-                        </div>
+                    stats_html += f"""
+                    <div class="{card_class_text}" style="--delay: {card_delay}ms;">
+                        {card_inner_html}
                     </div>"""
 
             stats_html += """
+                    </div>
                 </div>"""
 
     # 生成新增新闻区域的HTML
     new_titles_html = ""
     if report_data["new_titles"]:
         new_titles_html += f"""
-                <div class="new-section">
-                    <div class="new-section-title">本次新增热点 (共 {report_data['total_new_count']} 条)</div>"""
+                <div class="new-section bento-card span-12" style="--delay: 240ms;">
+                    <div class="new-section-title">本次新增热点 (共 {report_data['total_new_count']} 条)</div>
+                    <div class="new-source-grid">"""
 
         for source_data in report_data["new_titles"]:
             escaped_source = html_escape(source_data["source_name"])
@@ -841,10 +1838,15 @@ def render_html_content(
                     </div>"""
 
         new_titles_html += """
+                    </div>
                 </div>"""
 
     # 生成 RSS 统计内容
-    def render_rss_stats_html(stats: List[Dict], title: str = "RSS 订阅更新") -> str:
+    def render_rss_stats_html(
+        stats: List[Dict],
+        title: str = "RSS 订阅更新",
+        delay_ms: int = 0,
+    ) -> str:
         """渲染 RSS 统计区块 HTML
 
         Args:
@@ -878,11 +1880,12 @@ def render_html_content(
             return ""
 
         rss_html = f"""
-                <div class="rss-section">
+                <div class="rss-section bento-card span-12" style="--delay: {delay_ms}ms;">
                     <div class="rss-section-header">
                         <div class="rss-section-title">{title}</div>
                         <div class="rss-section-count">{total_count} 条</div>
-                    </div>"""
+                    </div>
+                    <div class="rss-grid">"""
 
         # 按关键词分组渲染（与热榜格式一致）
         for stat in stats:
@@ -894,11 +1897,11 @@ def render_html_content(
             keyword_count = len(titles)
 
             rss_html += f"""
-                    <div class="feed-group">
-                        <div class="feed-header">
-                            <div class="feed-name">{html_escape(keyword)}</div>
-                            <div class="feed-count">{keyword_count} 条</div>
-                        </div>"""
+                        <div class="feed-group">
+                            <div class="feed-header">
+                                <div class="feed-name">{html_escape(keyword)}</div>
+                                <div class="feed-count">{keyword_count} 条</div>
+                            </div>"""
 
             for title_data in titles:
                 item_title = title_data.get("title", "")
@@ -936,15 +1939,16 @@ def render_html_content(
                         </div>"""
 
             rss_html += """
-                    </div>"""
+                        </div>"""
 
         rss_html += """
+                    </div>
                 </div>"""
         return rss_html
 
     # 生成 RSS 统计和新增 HTML
-    rss_stats_html = render_rss_stats_html(rss_items, "RSS 订阅更新") if rss_items else ""
-    rss_new_html = render_rss_stats_html(rss_new_items, "RSS 新增更新") if rss_new_items else ""
+    rss_stats_html = render_rss_stats_html(rss_items, "RSS 订阅更新", delay_ms=280) if rss_items else ""
+    rss_new_html = render_rss_stats_html(rss_new_items, "RSS 新增更新", delay_ms=340) if rss_new_items else ""
 
     # 根据配置决定内容顺序（与推送逻辑一致）
     if reverse_content_order:
@@ -957,6 +1961,7 @@ def render_html_content(
         html += stats_html + rss_stats_html + new_titles_html + rss_new_html
 
     html += """
+                </div>
             </div>
 
             <div class="footer">
@@ -977,316 +1982,10 @@ def render_html_content(
                 </div>
             </div>
         </div>
-
-        <script>
-            async function saveAsImage() {
-                const button = event.target;
-                const originalText = button.textContent;
-
-                try {
-                    button.textContent = '生成中...';
-                    button.disabled = true;
-                    window.scrollTo(0, 0);
-
-                    // 等待页面稳定
-                    await new Promise(resolve => setTimeout(resolve, 200));
-
-                    // 截图前隐藏按钮
-                    const buttons = document.querySelector('.save-buttons');
-                    buttons.style.visibility = 'hidden';
-
-                    // 再次等待确保按钮完全隐藏
-                    await new Promise(resolve => setTimeout(resolve, 100));
-
-                    const container = document.querySelector('.container');
-
-                    const canvas = await html2canvas(container, {
-                        backgroundColor: '#ffffff',
-                        scale: 1.5,
-                        useCORS: true,
-                        allowTaint: false,
-                        imageTimeout: 10000,
-                        removeContainer: false,
-                        foreignObjectRendering: false,
-                        logging: false,
-                        width: container.offsetWidth,
-                        height: container.offsetHeight,
-                        x: 0,
-                        y: 0,
-                        scrollX: 0,
-                        scrollY: 0,
-                        windowWidth: window.innerWidth,
-                        windowHeight: window.innerHeight
-                    });
-
-                    buttons.style.visibility = 'visible';
-
-                    const link = document.createElement('a');
-                    const now = new Date();
-                    const filename = `TrendRadar_热点新闻分析_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}.png`;
-
-                    link.download = filename;
-                    link.href = canvas.toDataURL('image/png', 1.0);
-
-                    // 触发下载
-                    document.body.appendChild(link);
-                    link.click();
-                    document.body.removeChild(link);
-
-                    button.textContent = '保存成功!';
-                    setTimeout(() => {
-                        button.textContent = originalText;
-                        button.disabled = false;
-                    }, 2000);
-
-                } catch (error) {
-                    const buttons = document.querySelector('.save-buttons');
-                    buttons.style.visibility = 'visible';
-                    button.textContent = '保存失败';
-                    setTimeout(() => {
-                        button.textContent = originalText;
-                        button.disabled = false;
-                    }, 2000);
-                }
-            }
-
-            async function saveAsMultipleImages() {
-                const button = event.target;
-                const originalText = button.textContent;
-                const container = document.querySelector('.container');
-                const scale = 1.5;
-                const maxHeight = 5000 / scale;
-
-                try {
-                    button.textContent = '分析中...';
-                    button.disabled = true;
-
-                    // 获取所有可能的分割元素
-                    const newsItems = Array.from(container.querySelectorAll('.news-item'));
-                    const wordGroups = Array.from(container.querySelectorAll('.word-group'));
-                    const newSection = container.querySelector('.new-section');
-                    const errorSection = container.querySelector('.error-section');
-                    const header = container.querySelector('.header');
-                    const footer = container.querySelector('.footer');
-
-                    // 计算元素位置和高度
-                    const containerRect = container.getBoundingClientRect();
-                    const elements = [];
-
-                    // 添加header作为必须包含的元素
-                    elements.push({
-                        type: 'header',
-                        element: header,
-                        top: 0,
-                        bottom: header.offsetHeight,
-                        height: header.offsetHeight
-                    });
-
-                    // 添加错误信息（如果存在）
-                    if (errorSection) {
-                        const rect = errorSection.getBoundingClientRect();
-                        elements.push({
-                            type: 'error',
-                            element: errorSection,
-                            top: rect.top - containerRect.top,
-                            bottom: rect.bottom - containerRect.top,
-                            height: rect.height
-                        });
-                    }
-
-                    // 按word-group分组处理news-item
-                    wordGroups.forEach(group => {
-                        const groupRect = group.getBoundingClientRect();
-                        const groupNewsItems = group.querySelectorAll('.news-item');
-
-                        // 添加word-group的header部分
-                        const wordHeader = group.querySelector('.word-header');
-                        if (wordHeader) {
-                            const headerRect = wordHeader.getBoundingClientRect();
-                            elements.push({
-                                type: 'word-header',
-                                element: wordHeader,
-                                parent: group,
-                                top: groupRect.top - containerRect.top,
-                                bottom: headerRect.bottom - containerRect.top,
-                                height: headerRect.height
-                            });
-                        }
-
-                        // 添加每个news-item
-                        groupNewsItems.forEach(item => {
-                            const rect = item.getBoundingClientRect();
-                            elements.push({
-                                type: 'news-item',
-                                element: item,
-                                parent: group,
-                                top: rect.top - containerRect.top,
-                                bottom: rect.bottom - containerRect.top,
-                                height: rect.height
-                            });
-                        });
-                    });
-
-                    // 添加新增新闻部分
-                    if (newSection) {
-                        const rect = newSection.getBoundingClientRect();
-                        elements.push({
-                            type: 'new-section',
-                            element: newSection,
-                            top: rect.top - containerRect.top,
-                            bottom: rect.bottom - containerRect.top,
-                            height: rect.height
-                        });
-                    }
-
-                    // 添加footer
-                    const footerRect = footer.getBoundingClientRect();
-                    elements.push({
-                        type: 'footer',
-                        element: footer,
-                        top: footerRect.top - containerRect.top,
-                        bottom: footerRect.bottom - containerRect.top,
-                        height: footer.offsetHeight
-                    });
-
-                    // 计算分割点
-                    const segments = [];
-                    let currentSegment = { start: 0, end: 0, height: 0, includeHeader: true };
-                    let headerHeight = header.offsetHeight;
-                    currentSegment.height = headerHeight;
-
-                    for (let i = 1; i < elements.length; i++) {
-                        const element = elements[i];
-                        const potentialHeight = element.bottom - currentSegment.start;
-
-                        // 检查是否需要创建新分段
-                        if (potentialHeight > maxHeight && currentSegment.height > headerHeight) {
-                            // 在前一个元素结束处分割
-                            currentSegment.end = elements[i - 1].bottom;
-                            segments.push(currentSegment);
-
-                            // 开始新分段
-                            currentSegment = {
-                                start: currentSegment.end,
-                                end: 0,
-                                height: element.bottom - currentSegment.end,
-                                includeHeader: false
-                            };
-                        } else {
-                            currentSegment.height = potentialHeight;
-                            currentSegment.end = element.bottom;
-                        }
-                    }
-
-                    // 添加最后一个分段
-                    if (currentSegment.height > 0) {
-                        currentSegment.end = container.offsetHeight;
-                        segments.push(currentSegment);
-                    }
-
-                    button.textContent = `生成中 (0/${segments.length})...`;
-
-                    // 隐藏保存按钮
-                    const buttons = document.querySelector('.save-buttons');
-                    buttons.style.visibility = 'hidden';
-
-                    // 为每个分段生成图片
-                    const images = [];
-                    for (let i = 0; i < segments.length; i++) {
-                        const segment = segments[i];
-                        button.textContent = `生成中 (${i + 1}/${segments.length})...`;
-
-                        // 创建临时容器用于截图
-                        const tempContainer = document.createElement('div');
-                        tempContainer.style.cssText = `
-                            position: absolute;
-                            left: -9999px;
-                            top: 0;
-                            width: ${container.offsetWidth}px;
-                            background: white;
-                        `;
-                        tempContainer.className = 'container';
-
-                        // 克隆容器内容
-                        const clonedContainer = container.cloneNode(true);
-
-                        // 移除克隆内容中的保存按钮
-                        const clonedButtons = clonedContainer.querySelector('.save-buttons');
-                        if (clonedButtons) {
-                            clonedButtons.style.display = 'none';
-                        }
-
-                        tempContainer.appendChild(clonedContainer);
-                        document.body.appendChild(tempContainer);
-
-                        // 等待DOM更新
-                        await new Promise(resolve => setTimeout(resolve, 100));
-
-                        // 使用html2canvas截取特定区域
-                        const canvas = await html2canvas(clonedContainer, {
-                            backgroundColor: '#ffffff',
-                            scale: scale,
-                            useCORS: true,
-                            allowTaint: false,
-                            imageTimeout: 10000,
-                            logging: false,
-                            width: container.offsetWidth,
-                            height: segment.end - segment.start,
-                            x: 0,
-                            y: segment.start,
-                            windowWidth: window.innerWidth,
-                            windowHeight: window.innerHeight
-                        });
-
-                        images.push(canvas.toDataURL('image/png', 1.0));
-
-                        // 清理临时容器
-                        document.body.removeChild(tempContainer);
-                    }
-
-                    // 恢复按钮显示
-                    buttons.style.visibility = 'visible';
-
-                    // 下载所有图片
-                    const now = new Date();
-                    const baseFilename = `TrendRadar_热点新闻分析_${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
-
-                    for (let i = 0; i < images.length; i++) {
-                        const link = document.createElement('a');
-                        link.download = `${baseFilename}_part${i + 1}.png`;
-                        link.href = images[i];
-                        document.body.appendChild(link);
-                        link.click();
-                        document.body.removeChild(link);
-
-                        // 延迟一下避免浏览器阻止多个下载
-                        await new Promise(resolve => setTimeout(resolve, 100));
-                    }
-
-                    button.textContent = `已保存 ${segments.length} 张图片!`;
-                    setTimeout(() => {
-                        button.textContent = originalText;
-                        button.disabled = false;
-                    }, 2000);
-
-                } catch (error) {
-                    console.error('分段保存失败:', error);
-                    const buttons = document.querySelector('.save-buttons');
-                    buttons.style.visibility = 'visible';
-                    button.textContent = '保存失败';
-                    setTimeout(() => {
-                        button.textContent = originalText;
-                        button.disabled = false;
-                    }, 2000);
-                }
-            }
-
-            document.addEventListener('DOMContentLoaded', function() {
-                window.scrollTo(0, 0);
-            });
-        </script>
     </body>
     </html>
     """
 
+    preview_session.close()
+    _save_preview_cache(preview_cache)
     return html
