@@ -934,7 +934,7 @@ def render_html_content(
                 color: var(--ink);
                 position: relative;
                 transition: transform 0.2s ease, box-shadow 0.2s ease;
-                height: 220px;
+                min-height: 220px;
                 overflow: hidden;
                 animation: fadeIn 0.6s ease both;
                 animation-delay: var(--delay, 0ms);
@@ -1534,7 +1534,7 @@ def render_html_content(
                     gap: 10px;
                 }
                 .news-card {
-                    height: 210px;
+                    min-height: 210px;
                 }
             }
 
@@ -1542,7 +1542,7 @@ def render_html_content(
                 .news-grid {
                     grid-template-columns: 1fr;
                 }
-                .news-card { height: 210px; }
+                .news-card { min-height: 210px; }
             }
         </style>
     </head>
