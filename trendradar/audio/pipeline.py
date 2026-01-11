@@ -1,0 +1,555 @@
+# coding=utf-8
+"""
+Audio summary pipeline.
+"""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+import requests
+
+from trendradar.report.helpers import clean_title
+from trendradar.utils.time import get_configured_time
+
+
+@dataclass
+class AudioResult:
+    audio_path: Optional[str]
+    chapters_path: Optional[str]
+    generated: bool
+
+
+def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResult]:
+    audio_cfg = config.get("AUDIO", {})
+    if not audio_cfg.get("ENABLED", False):
+        return None
+
+    output_cfg = audio_cfg.get("OUTPUT", {})
+    output_dir = Path(output_cfg.get("DIR", "output/audio"))
+    public_dir = Path(output_cfg.get("PUBLIC_DIR", "audio"))
+    filename = output_cfg.get("FILENAME", "latest.mp3")
+    chapters_filename = output_cfg.get("CHAPTERS_FILENAME", "chapters.json")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    public_dir.mkdir(parents=True, exist_ok=True)
+
+    output_audio_path = output_dir / filename
+    public_audio_path = public_dir / filename
+    output_chapters_path = output_dir / chapters_filename
+    public_chapters_path = public_dir / chapters_filename
+
+    if not _should_generate_audio(public_audio_path, audio_cfg.get("INTERVAL_HOURS", 12)):
+        return AudioResult(str(public_audio_path), str(public_chapters_path), generated=False)
+
+    gemini_key = audio_cfg.get("GEMINI_API_KEY", "").strip()
+    tts_cfg = audio_cfg.get("TTS", {})
+    tts_endpoint = tts_cfg.get("ENDPOINT", "").strip()
+
+    if not gemini_key:
+        print("[音频播报] 未配置 GEMINI_API_KEY，跳过音频生成")
+        return None
+    if not tts_endpoint:
+        print("[音频播报] 未配置 IndexTTS endpoint，跳过音频生成")
+        return None
+
+    items = _flatten_report_items(report_data)
+    if not items:
+        print("[音频播报] 无可用新闻数据")
+        return None
+
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "TrendRadarAudio/1.0 (+https://github.com/sansan0/TrendRadar)"
+    })
+
+    try:
+        _enrich_items_with_content(items, session, audio_cfg)
+        clusters = _cluster_items(items, audio_cfg)
+        summaries = _summarize_clusters(clusters, audio_cfg, gemini_key)
+        if not summaries:
+            print("[音频播报] 摘要生成失败，跳过")
+            return None
+
+        segments = _build_script_segments(summaries, config)
+        if not segments:
+            print("[音频播报] 音频脚本为空，跳过")
+            return None
+
+        segment_dir = output_dir / "segments"
+        segment_dir.mkdir(parents=True, exist_ok=True)
+
+        audio_segments, durations = _synthesize_segments(
+            segments,
+            segment_dir,
+            tts_cfg,
+        )
+        if not audio_segments:
+            print("[音频播报] TTS 生成失败，跳过")
+            return None
+
+        assembled = _concat_audio(audio_segments, output_audio_path)
+        if not assembled:
+            print("[音频播报] 音频合成失败，跳过")
+            return None
+
+        if not durations:
+            durations = _estimate_durations(segments)
+
+        chapters = _build_chapters(segments, durations)
+        _write_chapters(chapters, output_chapters_path)
+
+        shutil.copyfile(output_audio_path, public_audio_path)
+        shutil.copyfile(output_chapters_path, public_chapters_path)
+
+        return AudioResult(str(public_audio_path), str(public_chapters_path), generated=True)
+    except Exception as exc:
+        print(f"[音频播报] 生成失败: {exc}")
+        return None
+    finally:
+        session.close()
+
+
+def _should_generate_audio(audio_path: Path, interval_hours: int) -> bool:
+    if not audio_path.exists():
+        return True
+    last_time = audio_path.stat().st_mtime
+    return (time.time() - last_time) >= interval_hours * 3600
+
+
+def _flatten_report_items(report_data: Dict) -> List[Dict]:
+    items: List[Dict] = []
+    for stat in report_data.get("stats", []):
+        keyword = stat.get("word", "")
+        for title_data in stat.get("titles", []):
+            title = title_data.get("title", "").strip()
+            if not title:
+                continue
+            url = title_data.get("mobile_url") or title_data.get("url", "")
+            items.append({
+                "title": title,
+                "url": url,
+                "source": title_data.get("source_name", ""),
+                "ranks": title_data.get("ranks", []),
+                "count": title_data.get("count", 1),
+                "time_display": title_data.get("time_display", ""),
+                "keyword": keyword,
+            })
+    return items
+
+
+def _enrich_items_with_content(items: List[Dict], session: requests.Session, audio_cfg: Dict) -> None:
+    timeout = audio_cfg.get("FETCH_TIMEOUT_SECONDS", 5)
+    max_bytes = audio_cfg.get("FETCH_MAX_BYTES", 0)
+    for item in items:
+        url = item.get("url")
+        if not url:
+            item["content"] = ""
+            continue
+        item["content"] = _fetch_article_text(session, url, timeout, max_bytes)
+
+
+def _fetch_article_text(
+    session: requests.Session,
+    url: str,
+    timeout: int,
+    max_bytes: int,
+) -> str:
+    try:
+        response = session.get(url, timeout=timeout, stream=True)
+        response.raise_for_status()
+        chunks = []
+        total = 0
+        for chunk in response.iter_content(chunk_size=4096):
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if max_bytes and total >= max_bytes:
+                break
+        html = b"".join(chunks).decode("utf-8", errors="ignore")
+        return _strip_html(html)
+    except Exception:
+        return ""
+
+
+def _strip_html(html: str) -> str:
+    cleaned = re.sub(r"(?is)<script.*?>.*?</script>", " ", html)
+    cleaned = re.sub(r"(?is)<style.*?>.*?</style>", " ", cleaned)
+    cleaned = re.sub(r"(?is)<!--.*?-->", " ", cleaned)
+    cleaned = re.sub(r"<[^>]+>", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _cluster_items(items: List[Dict], audio_cfg: Dict) -> List[Dict]:
+    fuzzy_threshold = audio_cfg.get("FUZZY_SIM_THRESHOLD", 90)
+    embedding_threshold = audio_cfg.get("EMBEDDING_SIM_THRESHOLD", 0.82)
+    model_name = audio_cfg.get("EMBEDDING_MODEL", "intfloat/multilingual-e5-small")
+
+    try:
+        from rapidfuzz import fuzz
+    except ImportError:
+        print("[音频播报] 未安装 rapidfuzz，跳过聚类")
+        return [{"items": items}]
+
+    try:
+        from sentence_transformers import SentenceTransformer
+        import numpy as np
+    except ImportError:
+        print("[音频播报] 未安装 sentence-transformers，跳过语义聚类")
+        return _cluster_by_fuzzy(items, fuzz, fuzzy_threshold)
+
+    fuzzy_clusters = _cluster_by_fuzzy(items, fuzz, fuzzy_threshold)
+    if len(fuzzy_clusters) <= 1:
+        return fuzzy_clusters
+
+    model = SentenceTransformer(model_name)
+
+    embeddings = []
+    for cluster in fuzzy_clusters:
+        for item in cluster["items"]:
+            text = _embedding_text(item)
+            embedding = model.encode(text, normalize_embeddings=True)
+            item["_embedding"] = embedding
+            embeddings.append(embedding)
+
+    merged_clusters: List[Dict] = []
+
+    for cluster in fuzzy_clusters:
+        centroid = _cluster_centroid(cluster, np)
+        merged = False
+        for target in merged_clusters:
+            target_centroid = target.get("_centroid")
+            if target_centroid is None:
+                continue
+            similarity = float(np.dot(centroid, target_centroid))
+            if similarity >= embedding_threshold:
+                target["items"].extend(cluster["items"])
+                target["_centroid"] = _cluster_centroid(target, np)
+                merged = True
+                break
+        if not merged:
+            cluster["_centroid"] = centroid
+            merged_clusters.append(cluster)
+
+    return merged_clusters
+
+
+def _cluster_by_fuzzy(items: List[Dict], fuzz, threshold: float) -> List[Dict]:
+    clusters: List[Dict] = []
+    for item in items:
+        normalized = _normalize_title(item["title"])
+        matched = False
+        for cluster in clusters:
+            if fuzz.ratio(normalized, cluster["_norm"]) >= threshold:
+                cluster["items"].append(item)
+                matched = True
+                break
+        if not matched:
+            clusters.append({"items": [item], "_norm": normalized})
+    return clusters
+
+
+def _normalize_title(title: str) -> str:
+    cleaned = clean_title(title).lower()
+    cleaned = re.sub(r"[^a-z0-9\u4e00-\u9fff]+", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
+def _embedding_text(item: Dict) -> str:
+    content = item.get("content", "") or ""
+    trimmed = content[:500]
+    return f"{item.get('title', '')}\n{trimmed}"
+
+
+def _cluster_centroid(cluster: Dict, np):
+    vectors = [item.get("_embedding") for item in cluster["items"] if item.get("_embedding") is not None]
+    if not vectors:
+        return None
+    return np.mean(vectors, axis=0)
+
+
+def _summarize_clusters(clusters: List[Dict], audio_cfg: Dict, api_key: str) -> List[Dict]:
+    try:
+        import google.generativeai as genai
+    except ImportError:
+        print("[音频播报] 未安装 google-generativeai，跳过")
+        return []
+
+    genai.configure(api_key=api_key)
+    model_name = audio_cfg.get("GEMINI_MODEL", "gemini-1.5-flash")
+    model = genai.GenerativeModel(model_name)
+
+    summaries = []
+    for cluster in clusters:
+        items = cluster.get("items", [])
+        if not items:
+            continue
+        summary = _summarize_cluster(model, items)
+        if summary:
+            summaries.append(summary)
+
+    return summaries
+
+
+def _summarize_cluster(model, items: List[Dict]) -> Optional[Dict]:
+    sources = sorted({item.get("source", "") for item in items if item.get("source")})
+    titles = [item.get("title", "") for item in items if item.get("title")]
+    sample_title = titles[0] if titles else ""
+
+    min_rank = min((min(item.get("ranks") or [999]) for item in items), default=999)
+    max_rank = max((max(item.get("ranks") or [0]) for item in items), default=0)
+    total_count = sum(item.get("count", 1) for item in items)
+    source_count = len(sources)
+
+    snippets = []
+    for item in items[:6]:
+        snippet = item.get("content", "")[:300]
+        snippets.append({
+            "title": item.get("title", ""),
+            "snippet": snippet,
+            "source": item.get("source", ""),
+        })
+
+    prompt = """
+你是新闻播报助手，请根据提供的多平台信息，输出 JSON。
+要求：
+- summary: 2-3 句，保持中立。
+- short_summary: 1 句，保持中立。
+- priority_score: 0-100。
+- title: 事件标题（简短）。
+只输出 JSON，不要多余文本。
+"""
+
+    payload = {
+        "sample_title": sample_title,
+        "sources": sources,
+        "stats": {
+            "min_rank": min_rank,
+            "max_rank": max_rank,
+            "total_count": total_count,
+            "source_count": source_count,
+        },
+        "items": snippets,
+    }
+
+    try:
+        response = model.generate_content(
+            f"{prompt}\n数据: {json.dumps(payload, ensure_ascii=False)}",
+            generation_config={"temperature": 0.3},
+        )
+        text = response.text.strip()
+        data = _safe_json_from_text(text)
+        if not data:
+            return None
+        if "title" not in data:
+            data["title"] = sample_title
+        if "short_summary" not in data:
+            data["short_summary"] = data.get("summary", "")
+        data["sources"] = sources
+        data["priority_score"] = float(data.get("priority_score", 0))
+        return data
+    except Exception:
+        return None
+
+
+def _safe_json_from_text(text: str) -> Optional[Dict]:
+    match = re.search(r"\{.*\}", text, re.S)
+    if not match:
+        return None
+    try:
+        return json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+
+
+def _build_script_segments(summaries: List[Dict], config: Dict) -> List[Dict]:
+    if not summaries:
+        return []
+
+    timezone = config.get("TIMEZONE", "Asia/Shanghai")
+    now = get_configured_time(timezone)
+    date_label = now.strftime("%m-%d %H:%M")
+
+    summaries_sorted = sorted(summaries, key=lambda s: s.get("priority_score", 0), reverse=True)
+    high_count = max(1, math.ceil(len(summaries_sorted) * 0.3))
+
+    segments = []
+    intro = (
+        f"主持人：大家好，这里是今日热点简报，时间 {date_label}。"
+        "提示：本播报来源于公开信息，内容可能需要核实。"
+    )
+    segments.append({"text": intro, "chapter": None})
+
+    for idx, item in enumerate(summaries_sorted):
+        is_high = idx < high_count
+        summary_text = item.get("summary", "") if is_high else item.get("short_summary", "")
+        if not summary_text:
+            summary_text = item.get("summary", "") or item.get("short_summary", "") or item.get("title", "")
+
+        if not summary_text:
+            continue
+
+        summary_text = _format_dialogue(summary_text)
+        sources_text = "、".join(item.get("sources", []))
+        if sources_text:
+            summary_text = f"{summary_text} 来源包括：{sources_text}。"
+
+        segments.append({
+            "text": summary_text,
+            "chapter": {
+                "title": item.get("title", "") or item.get("sample_title", "事件更新"),
+                "sources": item.get("sources", []),
+            },
+        })
+
+    outro = "主持人：以上是今天的热点简报，提醒大家结合原始来源核实信息。"
+    segments.append({"text": outro, "chapter": None})
+
+    return segments
+
+
+def _format_dialogue(text: str) -> str:
+    sentences = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
+    if not sentences:
+        return text
+
+    parts = []
+    speakers = ["主持人", "搭档"]
+    for idx, sentence in enumerate(sentences):
+        speaker = speakers[idx % 2]
+        parts.append(f"{speaker}：{sentence}")
+    return " ".join(parts)
+
+
+def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict) -> Tuple[List[Path], List[float]]:
+    audio_segments = []
+    durations = []
+
+    endpoint = tts_cfg.get("ENDPOINT", "")
+    api_key = tts_cfg.get("API_KEY", "")
+    voice = tts_cfg.get("VOICE", "default")
+    output_format = tts_cfg.get("FORMAT", "mp3")
+
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "")
+        if not text:
+            continue
+        payload = {"text": text, "voice": voice, "format": output_format}
+        try:
+            response = requests.post(endpoint, headers=headers, json=payload, timeout=60)
+            response.raise_for_status()
+            audio_data = response.content
+            segment_path = segment_dir / f"segment_{idx:03d}.{output_format}"
+            with open(segment_path, "wb") as handle:
+                handle.write(audio_data)
+            audio_segments.append(segment_path)
+            durations.append(_probe_duration(segment_path))
+        except Exception:
+            continue
+
+    return audio_segments, durations
+
+
+def _probe_duration(path: Path) -> float:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        return 0.0
+    try:
+        result = subprocess.run(
+            [
+                ffprobe,
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=nokey=1:noprint_wrappers=1",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return float(result.stdout.strip())
+    except Exception:
+        return 0.0
+
+
+def _estimate_durations(segments: List[Dict]) -> List[float]:
+    durations = []
+    for segment in segments:
+        text = segment.get("text", "")
+        estimated = max(2.0, len(text) / 6.0)
+        durations.append(estimated)
+    return durations
+
+
+def _concat_audio(segment_paths: List[Path], output_path: Path) -> bool:
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        print("[音频播报] 未找到 ffmpeg，无法合成音频")
+        return False
+
+    concat_file = output_path.parent / "concat_list.txt"
+    with open(concat_file, "w", encoding="utf-8") as handle:
+        for path in segment_paths:
+            handle.write(f"file '{path.as_posix()}'\n")
+
+    try:
+        subprocess.run(
+            [
+                ffmpeg,
+                "-y",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                str(concat_file),
+                "-c",
+                "copy",
+                str(output_path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return True
+    except Exception:
+        return False
+
+
+def _build_chapters(segments: List[Dict], durations: List[float]) -> List[Dict]:
+    chapters = []
+    current = 0.0
+    for segment, duration in zip(segments, durations):
+        chapter = segment.get("chapter")
+        if chapter:
+            chapters.append({
+                "title": chapter.get("title", ""),
+                "start": round(current, 2),
+                "sources": chapter.get("sources", []),
+            })
+        current += duration
+    return chapters
+
+
+def _write_chapters(chapters: List[Dict], path: Path) -> None:
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(chapters, handle, ensure_ascii=False)

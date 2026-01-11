@@ -18,6 +18,7 @@ from trendradar import __version__
 from trendradar.core import load_config
 from trendradar.core.analyzer import convert_keyword_stats_to_platform_stats
 from trendradar.crawler import DataFetcher
+from trendradar.audio import maybe_generate_audio
 from trendradar.storage import convert_crawl_results_to_news_data
 from trendradar.utils.time import is_within_days
 
@@ -331,6 +332,17 @@ class NewsAnalyzer:
                 self.ctx.weight_config,
                 self.ctx.rank_threshold,
             )
+
+        # 音频播报（可选）
+        if self.ctx.config.get("AUDIO", {}).get("ENABLED", False):
+            report_data = self.ctx.prepare_report(
+                stats=stats,
+                failed_ids=failed_ids,
+                new_titles=new_titles,
+                id_to_name=id_to_name,
+                mode=mode,
+            )
+            maybe_generate_audio(report_data, self.ctx.config)
 
         # HTML生成（如果启用）
         html_file = None

@@ -212,6 +212,51 @@ def _load_storage_config(config_data: Dict) -> Dict:
     }
 
 
+def _load_audio_config(config_data: Dict) -> Dict:
+    """加载音频播报配置"""
+    audio = config_data.get("audio", {})
+    tts = audio.get("tts", {})
+    output = audio.get("output", {})
+
+    enabled_env = _get_env_bool("AUDIO_ENABLED")
+    interval_env = _get_env_int("AUDIO_INTERVAL_HOURS")
+    fetch_timeout_env = _get_env_int("AUDIO_FETCH_TIMEOUT_SECONDS")
+    fetch_max_bytes_env = _get_env_int("AUDIO_FETCH_MAX_BYTES")
+    embedding_model_env = _get_env_str("AUDIO_EMBEDDING_MODEL")
+    embedding_sim_env = os.environ.get("AUDIO_EMBEDDING_SIM_THRESHOLD", "").strip()
+    fuzzy_sim_env = os.environ.get("AUDIO_FUZZY_SIM_THRESHOLD", "").strip()
+
+    def _parse_float(value: str, default: float) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    return {
+        "ENABLED": enabled_env if enabled_env is not None else audio.get("enabled", False),
+        "INTERVAL_HOURS": interval_env or audio.get("interval_hours", 12),
+        "FETCH_TIMEOUT_SECONDS": fetch_timeout_env or audio.get("fetch_timeout_seconds", 5),
+        "FETCH_MAX_BYTES": fetch_max_bytes_env or audio.get("fetch_max_bytes", 0),
+        "EMBEDDING_MODEL": embedding_model_env or audio.get("embedding_model", "intfloat/multilingual-e5-small"),
+        "EMBEDDING_SIM_THRESHOLD": _parse_float(embedding_sim_env, audio.get("embedding_sim_threshold", 0.82)),
+        "FUZZY_SIM_THRESHOLD": _parse_float(fuzzy_sim_env, audio.get("fuzzy_sim_threshold", 90)),
+        "GEMINI_MODEL": _get_env_str("GEMINI_MODEL") or audio.get("gemini_model", "gemini-1.5-flash"),
+        "GEMINI_API_KEY": _get_env_str("GEMINI_API_KEY") or audio.get("gemini_api_key", ""),
+        "TTS": {
+            "ENDPOINT": _get_env_str("INDEXTTS_ENDPOINT") or tts.get("endpoint", ""),
+            "API_KEY": _get_env_str("INDEXTTS_API_KEY") or tts.get("api_key", ""),
+            "VOICE": _get_env_str("INDEXTTS_VOICE") or tts.get("voice", "default"),
+            "FORMAT": _get_env_str("INDEXTTS_FORMAT") or tts.get("format", "mp3"),
+        },
+        "OUTPUT": {
+            "DIR": output.get("dir", "output/audio"),
+            "PUBLIC_DIR": output.get("public_dir", "audio"),
+            "FILENAME": output.get("filename", "latest.mp3"),
+            "CHAPTERS_FILENAME": output.get("chapters_filename", "chapters.json"),
+        },
+    }
+
+
 def _load_webhook_config(config_data: Dict) -> Dict:
     """加载 Webhook 配置"""
     notification = config_data.get("notification", {})
@@ -384,6 +429,9 @@ def load_config(config_path: Optional[str] = None) -> Dict[str, Any]:
 
     # 存储配置
     config["STORAGE"] = _load_storage_config(config_data)
+
+    # 音频播报配置
+    config["AUDIO"] = _load_audio_config(config_data)
 
     # Webhook 配置
     config.update(_load_webhook_config(config_data))

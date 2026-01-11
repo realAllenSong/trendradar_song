@@ -752,6 +752,7 @@ def render_html_content(
                 color: var(--ink);
                 line-height: 1.6;
                 padding: 12px;
+                padding-bottom: 130px;
             }
 
             .container {
@@ -1172,6 +1173,122 @@ def render_html_content(
                 color: #0f766e;
             }
 
+            .audio-shell {
+                position: fixed;
+                left: 16px;
+                right: 16px;
+                bottom: 16px;
+                z-index: 50;
+            }
+
+            .audio-player {
+                background: rgba(255, 255, 255, 0.96);
+                border: 1px solid rgba(15, 23, 42, 0.12);
+                border-radius: 16px;
+                padding: 12px 14px;
+                box-shadow: 0 16px 40px rgba(15, 23, 42, 0.18);
+                backdrop-filter: blur(12px);
+            }
+
+            .audio-main {
+                display: grid;
+                grid-template-columns: auto 1fr auto;
+                gap: 12px;
+                align-items: center;
+            }
+
+            .audio-controls {
+                display: flex;
+                gap: 10px;
+                align-items: center;
+            }
+
+            .audio-btn {
+                background: var(--accent);
+                border: none;
+                color: white;
+                width: 36px;
+                height: 36px;
+                border-radius: 999px;
+                font-size: 14px;
+                cursor: pointer;
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                box-shadow: 0 10px 20px rgba(37, 99, 235, 0.25);
+            }
+
+            .audio-btn.ghost {
+                background: rgba(15, 23, 42, 0.08);
+                color: var(--ink);
+                box-shadow: none;
+            }
+
+            .audio-meta {
+                display: flex;
+                flex-direction: column;
+                gap: 4px;
+            }
+
+            .audio-title {
+                font-size: 14px;
+                font-weight: 600;
+                color: var(--ink);
+            }
+
+            .audio-time {
+                font-size: 11px;
+                color: var(--muted);
+            }
+
+            .audio-progress {
+                width: 100%;
+                accent-color: var(--accent);
+            }
+
+            .audio-chapters {
+                margin-top: 10px;
+                border-top: 1px solid rgba(15, 23, 42, 0.08);
+                padding-top: 10px;
+                max-height: 220px;
+                overflow: auto;
+            }
+
+            .chapters-list {
+                display: grid;
+                gap: 6px;
+            }
+
+            .chapter-item {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 6px 8px;
+                border-radius: 10px;
+                cursor: pointer;
+                background: rgba(248, 250, 252, 0.9);
+                border: none;
+                width: 100%;
+                text-align: left;
+            }
+
+            .chapter-item:hover {
+                background: rgba(226, 232, 240, 0.8);
+            }
+
+            .chapter-title {
+                font-size: 12px;
+                color: var(--ink);
+                flex: 1;
+            }
+
+            .chapter-time {
+                font-size: 11px;
+                color: var(--muted);
+                white-space: nowrap;
+            }
+
             .news-preview {
                 background: linear-gradient(135deg, rgba(224, 242, 254, 0.9), rgba(255, 247, 237, 0.9));
                 border: 1px solid #e2e8f0;
@@ -1535,6 +1652,18 @@ def render_html_content(
                 }
                 .news-card {
                     min-height: 210px;
+                }
+                .audio-shell {
+                    left: 10px;
+                    right: 10px;
+                    bottom: 10px;
+                }
+                .audio-main {
+                    grid-template-columns: 1fr;
+                    gap: 8px;
+                }
+                .audio-controls {
+                    justify-content: space-between;
                 }
             }
 
@@ -1960,7 +2089,7 @@ def render_html_content(
         # 顺序：热榜统计 → RSS统计 → 热榜新增 → RSS新增
         html += stats_html + rss_stats_html + new_titles_html + rss_new_html
 
-    html += """
+        html += """
                 </div>
             </div>
 
@@ -1982,6 +2111,127 @@ def render_html_content(
                 </div>
             </div>
         </div>
+
+        <div class="audio-shell" id="audioShell" hidden>
+            <div class="audio-player">
+                <div class="audio-main">
+                    <div class="audio-controls">
+                        <button class="audio-btn" id="audioPlay" aria-label="播放">▶</button>
+                    </div>
+                    <div class="audio-meta">
+                        <div class="audio-title">今日热点播报</div>
+                        <input class="audio-progress" id="audioProgress" type="range" min="0" max="100" value="0" step="0.1">
+                        <div class="audio-time"><span id="audioCurrent">0:00</span> / <span id="audioDuration">0:00</span></div>
+                    </div>
+                    <div class="audio-controls">
+                        <button class="audio-btn ghost" id="audioChaptersToggle">章节</button>
+                    </div>
+                </div>
+                <div class="audio-chapters" id="audioChapters" hidden>
+                    <div class="chapters-list" id="chaptersList"></div>
+                </div>
+                <audio id="dailyAudio" preload="none" src="audio/latest.mp3"></audio>
+            </div>
+        </div>
+
+        <script>
+            (function() {
+                const audio = document.getElementById('dailyAudio');
+                const shell = document.getElementById('audioShell');
+                if (!audio || !shell) return;
+
+                const playBtn = document.getElementById('audioPlay');
+                const progress = document.getElementById('audioProgress');
+                const currentEl = document.getElementById('audioCurrent');
+                const durationEl = document.getElementById('audioDuration');
+                const chaptersToggle = document.getElementById('audioChaptersToggle');
+                const chaptersPanel = document.getElementById('audioChapters');
+                const chaptersList = document.getElementById('chaptersList');
+
+                const audioSrc = audio.getAttribute('src');
+                fetch(audioSrc, { method: 'HEAD' }).then((res) => {
+                    if (!res.ok) throw new Error('audio missing');
+                    shell.hidden = false;
+                    initPlayer();
+                    loadChapters();
+                }).catch(() => {});
+
+                function initPlayer() {
+                    playBtn.addEventListener('click', () => {
+                        if (audio.paused) {
+                            audio.play();
+                        } else {
+                            audio.pause();
+                        }
+                    });
+
+                    audio.addEventListener('play', () => {
+                        playBtn.textContent = '❚❚';
+                    });
+                    audio.addEventListener('pause', () => {
+                        playBtn.textContent = '▶';
+                    });
+                    audio.addEventListener('loadedmetadata', () => {
+                        durationEl.textContent = formatTime(audio.duration);
+                        progress.max = audio.duration;
+                    });
+                    audio.addEventListener('timeupdate', () => {
+                        progress.value = audio.currentTime;
+                        currentEl.textContent = formatTime(audio.currentTime);
+                    });
+
+                    progress.addEventListener('input', () => {
+                        audio.currentTime = Number(progress.value || 0);
+                    });
+
+                    chaptersToggle.addEventListener('click', () => {
+                        const isHidden = chaptersPanel.hasAttribute('hidden');
+                        if (isHidden) {
+                            chaptersPanel.removeAttribute('hidden');
+                        } else {
+                            chaptersPanel.setAttribute('hidden', 'true');
+                        }
+                    });
+                }
+
+                function loadChapters() {
+                    fetch('audio/chapters.json').then((res) => res.json()).then((data) => {
+                        if (!Array.isArray(data) || data.length === 0) return;
+                        chaptersList.innerHTML = '';
+                        data.forEach((chapter) => {
+                            const item = document.createElement('button');
+                            item.type = 'button';
+                            item.className = 'chapter-item';
+                            item.innerHTML = `
+                                <span class="chapter-title">${escapeHtml(chapter.title || '')}</span>
+                                <span class="chapter-time">${formatTime(chapter.start || 0)}</span>
+                            `;
+                            item.addEventListener('click', () => {
+                                audio.currentTime = Number(chapter.start || 0);
+                                audio.play();
+                            });
+                            chaptersList.appendChild(item);
+                        });
+                    }).catch(() => {});
+                }
+
+                function formatTime(seconds) {
+                    if (!Number.isFinite(seconds)) return '0:00';
+                    const mins = Math.floor(seconds / 60);
+                    const secs = Math.floor(seconds % 60);
+                    return `${mins}:${String(secs).padStart(2, '0')}`;
+                }
+
+                function escapeHtml(text) {
+                    return String(text)
+                        .replace(/&/g, '&amp;')
+                        .replace(/</g, '&lt;')
+                        .replace(/>/g, '&gt;')
+                        .replace(/\"/g, '&quot;')
+                        .replace(/'/g, '&#x27;');
+                }
+            })();
+        </script>
     </body>
     </html>
     """
