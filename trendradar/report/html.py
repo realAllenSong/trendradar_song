@@ -2149,9 +2149,14 @@ def render_html_content(
                 const chaptersList = document.getElementById('chaptersList');
 
                 const audioSrc = audio.getAttribute('src');
+                let metadataReady = false;
+                let audioBlobUrl = null;
+                let pendingSeek = null;
                 fetch(audioSrc, { method: 'HEAD' }).then((res) => {
                     if (!res.ok) throw new Error('audio missing');
                     shell.hidden = false;
+                    audio.preload = 'metadata';
+                    audio.load();
                     initPlayer();
                     loadChapters();
                 }).catch(() => {});
@@ -2172,6 +2177,7 @@ def render_html_content(
                         playBtn.textContent = '▶';
                     });
                     audio.addEventListener('loadedmetadata', () => {
+                        metadataReady = true;
                         durationEl.textContent = formatTime(audio.duration);
                         progress.max = audio.duration;
                     });
@@ -2181,7 +2187,7 @@ def render_html_content(
                     });
 
                     progress.addEventListener('input', () => {
-                        audio.currentTime = Number(progress.value || 0);
+                        seekTo(progress.value, false);
                     });
 
                     chaptersToggle.addEventListener('click', () => {
@@ -2192,6 +2198,7 @@ def render_html_content(
                             chaptersPanel.setAttribute('hidden', 'true');
                         }
                     });
+
                 }
 
                 function loadChapters() {
@@ -2207,11 +2214,57 @@ def render_html_content(
                                 <span class="chapter-time">${formatTime(chapter.start || 0)}</span>
                             `;
                             item.addEventListener('click', () => {
-                                audio.currentTime = Number(chapter.start || 0);
-                                audio.play();
+                                const time = Number(chapter.start || 0);
+                                seekTo(time, true);
                             });
                             chaptersList.appendChild(item);
                         });
+                    }).catch(() => {});
+                }
+
+                function seekTo(targetSeconds, shouldPlay) {
+                    const time = Math.max(0, Number(targetSeconds) || 0);
+                    if (metadataReady && audio.seekable && audio.seekable.length > 0) {
+                        applySeek(time, shouldPlay);
+                        return;
+                    }
+
+                    pendingSeek = { time, shouldPlay };
+                    audio.addEventListener('loadedmetadata', handlePendingSeek, { once: true });
+                    ensureSeekable();
+                }
+
+                function handlePendingSeek() {
+                    if (!pendingSeek) return;
+                    applySeek(pendingSeek.time, pendingSeek.shouldPlay);
+                    pendingSeek = null;
+                }
+
+                function applySeek(time, shouldPlay) {
+                    const safeTime = Math.min(time, audio.duration || time);
+                    audio.currentTime = safeTime;
+                    currentEl.textContent = formatTime(audio.currentTime);
+                    if (shouldPlay) {
+                        audio.play();
+                    }
+                }
+
+                function ensureSeekable() {
+                    if (audio.seekable && audio.seekable.length > 0) {
+                        return;
+                    }
+                    if (audioBlobUrl) {
+                        audio.load();
+                        return;
+                    }
+                    fetch(audioSrc).then((res) => {
+                        if (!res.ok) throw new Error('audio missing');
+                        return res.blob();
+                    }).then((blob) => {
+                        audioBlobUrl = URL.createObjectURL(blob);
+                        metadataReady = false;
+                        audio.src = audioBlobUrl;
+                        audio.load();
                     }).catch(() => {});
                 }
 
