@@ -243,6 +243,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
         "GEMINI_MODEL": _get_env_str("GEMINI_MODEL") or audio.get("gemini_model", "gemini-1.5-flash"),
         "GEMINI_API_KEY": _get_env_str("GEMINI_API_KEY") or audio.get("gemini_api_key", ""),
         "TTS": {
+            "PROVIDER": _get_env_str("INDEXTTS_PROVIDER") or tts.get("provider", ""),
             "ENDPOINT": _get_env_str("INDEXTTS_ENDPOINT") or tts.get("endpoint", ""),
             "API_KEY": _get_env_str("INDEXTTS_API_KEY") or tts.get("api_key", ""),
             "VOICE": _get_env_str("INDEXTTS_VOICE") or tts.get("voice", "default"),

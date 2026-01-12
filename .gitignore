@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Output caches / local artifacts
+output/news/*.db
+output/rss/*.db
+output/preview_cache.json
+output/audio/segments/
+output/audio/concat_list.txt
+*.log

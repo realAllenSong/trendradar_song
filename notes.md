@@ -35,3 +35,6 @@
 ### Implementation Notes
 - Audio pipeline gated by file mtime (12h interval).
 - HTML player loads audio/chapters at runtime and hides if unavailable.
+- IndexTTS can be called via HF Space `/gradio_api/call` (with gradio_client fallback) or HTTP endpoint.
+- Probe against IndexTTS official Space returned `API call failed` for `/gen_single` (Space may reject API calls or be unavailable).
+- Dropped heavy embedding dependencies from base install to avoid GitHub Actions disk errors; fuzzy clustering is used when embeddings are unavailable.

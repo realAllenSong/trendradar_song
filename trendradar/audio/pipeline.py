@@ -435,6 +435,23 @@ def _format_dialogue(text: str) -> str:
 
 
 def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict) -> Tuple[List[Path], List[float]]:
+    endpoint = tts_cfg.get("ENDPOINT", "")
+    provider = (tts_cfg.get("PROVIDER") or "").strip().lower()
+
+    if _is_hf_space_endpoint(endpoint, provider):
+        audio_segments, durations = _synthesize_segments_hf_space(segments, segment_dir, endpoint)
+        if audio_segments:
+            return audio_segments, durations
+        return _synthesize_segments_gradio(segments, segment_dir, endpoint)
+
+    return _synthesize_segments_http(segments, segment_dir, tts_cfg)
+
+
+def _synthesize_segments_http(
+    segments: List[Dict],
+    segment_dir: Path,
+    tts_cfg: Dict,
+) -> Tuple[List[Path], List[float]]:
     audio_segments = []
     durations = []
 
@@ -465,6 +482,228 @@ def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict)
             continue
 
     return audio_segments, durations
+
+
+def _synthesize_segments_gradio(
+    segments: List[Dict],
+    segment_dir: Path,
+    endpoint: str,
+) -> Tuple[List[Path], List[float]]:
+    try:
+        from gradio_client import Client
+    except ImportError:
+        print("[音频播报] 未安装 gradio_client，跳过 IndexTTS Space 调用")
+        return [], []
+
+    endpoint = _normalize_space_endpoint(endpoint)
+    client = Client(endpoint)
+
+    audio_segments = []
+    durations = []
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "")
+        if not text:
+            continue
+        try:
+            result = client.predict(*_default_space_args(text), api_name="/gen_single")
+            segment_path = _materialize_gradio_audio(result, segment_dir, idx)
+            if not segment_path:
+                continue
+            audio_segments.append(segment_path)
+            durations.append(_probe_duration(segment_path))
+        except Exception:
+            continue
+
+    return audio_segments, durations
+
+
+def _synthesize_segments_hf_space(
+    segments: List[Dict],
+    segment_dir: Path,
+    endpoint: str,
+) -> Tuple[List[Path], List[float]]:
+    base_url = _hf_space_base_url(endpoint)
+    if not base_url:
+        return [], []
+
+    audio_segments = []
+    durations = []
+
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "")
+        if not text:
+            continue
+        try:
+            payload = {"data": _default_space_args(text)}
+            response = requests.post(
+                f"{base_url}/gradio_api/call/gen_single",
+                json=payload,
+                timeout=60,
+            )
+            response.raise_for_status()
+            event_id = response.json().get("event_id")
+            if not event_id:
+                continue
+
+            result = _read_hf_space_event(base_url, "gen_single", event_id)
+            if not result:
+                continue
+
+            segment_path = _materialize_gradio_audio(result, segment_dir, idx)
+            if not segment_path:
+                continue
+            audio_segments.append(segment_path)
+            durations.append(_probe_duration(segment_path))
+        except Exception:
+            continue
+
+    return audio_segments, durations
+
+
+def _is_hf_space_endpoint(endpoint: str, provider: str) -> bool:
+    if provider in {"hf_space", "gradio", "space"}:
+        return True
+    if not endpoint:
+        return False
+    if endpoint.startswith("hf://"):
+        return True
+    if endpoint.startswith("http"):
+        return "hf.space" in endpoint or "huggingface.co/spaces" in endpoint
+    return "/" in endpoint
+
+
+def _hf_space_base_url(endpoint: str) -> Optional[str]:
+    if not endpoint:
+        return None
+
+    if endpoint.startswith("http"):
+        if "hf.space" in endpoint:
+            return endpoint.rstrip("/")
+        if "huggingface.co/spaces/" in endpoint:
+            space = endpoint.split("huggingface.co/spaces/")[-1].strip("/")
+        else:
+            return None
+    else:
+        space = endpoint.replace("hf://", "")
+
+    if "/" not in space:
+        return None
+
+    owner, name = space.split("/", 1)
+    slug = f"{owner}-{name}".lower().replace(" ", "-")
+    return f"https://{slug}.hf.space"
+
+
+def _read_hf_space_event(base_url: str, api_name: str, event_id: str) -> Optional[object]:
+    try:
+        response = requests.get(
+            f"{base_url}/gradio_api/call/{api_name}/{event_id}",
+            headers={"Accept": "text/event-stream"},
+            stream=True,
+            timeout=180,
+        )
+        response.raise_for_status()
+        current_event = None
+        for raw in response.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            if raw.startswith("event:"):
+                current_event = raw.split(":", 1)[1].strip()
+                continue
+            if not raw.startswith("data:"):
+                continue
+            data = raw.split(":", 1)[1].strip()
+            if current_event == "complete":
+                return json.loads(data)
+            if current_event == "error":
+                return None
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_space_endpoint(endpoint: str) -> str:
+    if endpoint.startswith("hf://"):
+        return endpoint.replace("hf://", "")
+    return endpoint
+
+
+def _default_space_args(text: str) -> List:
+    return [
+        "Same as the voice reference",  # emo_control_method
+        None,       # prompt audio path
+        text,       # text
+        None,       # emo_ref_path
+        0.8,        # emo_weight
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,  # vec1-vec8
+        "",         # emo_text
+        False,      # emo_random
+        120,        # max_text_tokens_per_segment
+        True,       # do_sample
+        0.8,        # top_p
+        30,         # top_k
+        0.8,        # temperature
+        0.0,        # length_penalty
+        3,          # num_beams
+        10.0,       # repetition_penalty
+        1500,       # max_mel_tokens
+    ]
+
+
+def _materialize_gradio_audio(result, segment_dir: Path, idx: int) -> Optional[Path]:
+    candidate = _extract_gradio_value(result)
+    if not candidate:
+        return None
+
+    if isinstance(candidate, (list, tuple)):
+        if candidate and isinstance(candidate[0], str):
+            candidate = candidate[0]
+        elif candidate and isinstance(candidate[0], dict):
+            candidate = candidate[0]
+
+    if isinstance(candidate, dict):
+        candidate = candidate.get("path") or candidate.get("name") or candidate.get("url")
+
+    if not candidate:
+        return None
+
+    suffix = _guess_extension(candidate)
+    segment_path = segment_dir / f"segment_{idx:03d}{suffix}"
+
+    if isinstance(candidate, str) and candidate.startswith("http"):
+        try:
+            response = requests.get(candidate, timeout=30)
+            response.raise_for_status()
+            with open(segment_path, "wb") as handle:
+                handle.write(response.content)
+            return segment_path
+        except Exception:
+            return None
+
+    if isinstance(candidate, str) and os.path.exists(candidate):
+        try:
+            shutil.copyfile(candidate, segment_path)
+            return segment_path
+        except Exception:
+            return None
+
+    return None
+
+
+def _extract_gradio_value(result):
+    if isinstance(result, dict):
+        return result.get("value", result)
+    return result
+
+
+def _guess_extension(candidate: str) -> str:
+    if not isinstance(candidate, str):
+        return ".wav"
+    lower = candidate.lower()
+    for ext in (".wav", ".mp3", ".flac", ".m4a"):
+        if lower.endswith(ext):
+            return ext
+    return ".wav"
 
 
 def _probe_duration(path: Path) -> float:
@@ -512,24 +751,26 @@ def _concat_audio(segment_paths: List[Path], output_path: Path) -> bool:
         for path in segment_paths:
             handle.write(f"file '{path.as_posix()}'\n")
 
+    cmd = [
+        ffmpeg,
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_file),
+    ]
+
+    if output_path.suffix.lower() == ".mp3":
+        cmd += ["-c:a", "libmp3lame", "-q:a", "4"]
+    else:
+        cmd += ["-c", "copy"]
+
+    cmd.append(str(output_path))
+
     try:
-        subprocess.run(
-            [
-                ffmpeg,
-                "-y",
-                "-f",
-                "concat",
-                "-safe",
-                "0",
-                "-i",
-                str(concat_file),
-                "-c",
-                "copy",
-                str(output_path),
-            ],
-            check=True,
-            capture_output=True,
-        )
+        subprocess.run(cmd, check=True, capture_output=True)
         return True
     except Exception:
         return False

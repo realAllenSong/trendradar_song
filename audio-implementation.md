@@ -7,18 +7,19 @@ Implemented the audio summary pipeline and UI integration described in `SPEC-aud
 - Added audio pipeline (`trendradar/audio/pipeline.py`) with:
   - Title dedup + event clustering (fuzzy + local embeddings).
   - Gemini-based summarization with priority scoring.
-  - IndexTTS synthesis, ffmpeg concatenation, and chapters JSON output.
+  - IndexTTS synthesis (HTTP, HF Space `/gradio_api/call`, with gradio_client fallback), ffmpeg concatenation, and chapters JSON output.
   - 12h interval gating by audio file mtime.
   - Writes audio/chapters to both `output/audio` and repo-root `audio`.
 - Integrated audio generation into `_run_analysis_pipeline` in `trendradar/__main__.py`.
 - Added bottom audio player + chapter list to `trendradar/report/html.py`.
 - Added audio config block to `config/config.yaml` and loader support in `trendradar/core/loader.py`.
 - Updated workflow commit step to include audio artifacts.
-- Added dependencies: `sentence-transformers`, `rapidfuzz`, `numpy`, `google-generativeai`.
+- Added dependencies: `rapidfuzz`, `google-generativeai`, `gradio_client`.
 
 ## Paths Updated
 - `trendradar/audio/pipeline.py`
 - `trendradar/audio/__init__.py`
+- `tools/indextts_space_probe.py`
 - `trendradar/__main__.py`
 - `trendradar/report/html.py`
 - `trendradar/core/loader.py`
