@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .env
 .env.*
+docker/.env
 
 # OS
 .DS_Store
@@ -17,3 +18,6 @@ output/preview_cache.json
 output/audio/segments/
 output/audio/concat_list.txt
 *.log
+
+# Local model downloads
+models/

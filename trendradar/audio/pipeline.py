@@ -20,7 +20,6 @@ from typing import Dict, List, Optional, Tuple
 import requests
 
 from trendradar.report.helpers import clean_title
-from trendradar.utils.time import get_configured_time
 
 
 @dataclass
@@ -28,6 +27,17 @@ class AudioResult:
     audio_path: Optional[str]
     chapters_path: Optional[str]
     generated: bool
+
+
+DEFAULT_SUMMARY_PROMPT = """
+你是新闻播报助手，请根据提供的多平台信息，输出 JSON。
+要求：
+- summary: 2-3 句，保持中立。
+- short_summary: 1 句，保持中立。
+- priority_score: 0-100。
+- title: 事件标题（简短）。
+只输出 JSON，不要多余文本。
+"""
 
 
 def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResult]:
@@ -40,6 +50,7 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     public_dir = Path(output_cfg.get("PUBLIC_DIR", "audio"))
     filename = output_cfg.get("FILENAME", "latest.mp3")
     chapters_filename = output_cfg.get("CHAPTERS_FILENAME", "chapters.json")
+    transcript_filename = output_cfg.get("TRANSCRIPT_FILENAME", "transcript.txt")
 
     output_dir.mkdir(parents=True, exist_ok=True)
     public_dir.mkdir(parents=True, exist_ok=True)
@@ -48,6 +59,8 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     public_audio_path = public_dir / filename
     output_chapters_path = output_dir / chapters_filename
     public_chapters_path = public_dir / chapters_filename
+    output_transcript_path = output_dir / transcript_filename
+    public_transcript_path = public_dir / transcript_filename
 
     if not _should_generate_audio(public_audio_path, audio_cfg.get("INTERVAL_HOURS", 12)):
         return AudioResult(str(public_audio_path), str(public_chapters_path), generated=False)
@@ -55,12 +68,14 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     gemini_key = audio_cfg.get("GEMINI_API_KEY", "").strip()
     tts_cfg = audio_cfg.get("TTS", {})
     tts_endpoint = tts_cfg.get("ENDPOINT", "").strip()
+    provider = (tts_cfg.get("PROVIDER") or "").strip().lower()
+    use_sherpa = provider in {"sherpa_onnx", "sherpa"}
 
     if not gemini_key:
         print("[音频播报] 未配置 GEMINI_API_KEY，跳过音频生成")
         return None
-    if not tts_endpoint:
-        print("[音频播报] 未配置 IndexTTS endpoint，跳过音频生成")
+    if not use_sherpa and not tts_endpoint:
+        print("[音频播报] 未配置 TTS endpoint，跳过音频生成")
         return None
 
     items = _flatten_report_items(report_data)
@@ -85,6 +100,9 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
         if not segments:
             print("[音频播报] 音频脚本为空，跳过")
             return None
+
+        _write_transcript(segments, output_transcript_path)
+        shutil.copyfile(output_transcript_path, public_transcript_path)
 
         segment_dir = output_dir / "segments"
         segment_dir.mkdir(parents=True, exist_ok=True)
@@ -283,28 +301,28 @@ def _cluster_centroid(cluster: Dict, np):
 
 def _summarize_clusters(clusters: List[Dict], audio_cfg: Dict, api_key: str) -> List[Dict]:
     try:
-        import google.generativeai as genai
+        from google import genai
     except ImportError:
-        print("[音频播报] 未安装 google-generativeai，跳过")
+        print("[音频播报] 未安装 google-genai，跳过")
         return []
 
-    genai.configure(api_key=api_key)
-    model_name = audio_cfg.get("GEMINI_MODEL", "gemini-1.5-flash")
-    model = genai.GenerativeModel(model_name)
+    model_name = audio_cfg.get("GEMINI_MODEL", "gemini-3-flash-preview")
+    summary_prompt = (audio_cfg.get("SUMMARY_PROMPT") or "").strip() or DEFAULT_SUMMARY_PROMPT.strip()
+    client = genai.Client(api_key=api_key)
 
     summaries = []
     for cluster in clusters:
         items = cluster.get("items", [])
         if not items:
             continue
-        summary = _summarize_cluster(model, items)
+        summary = _summarize_cluster(client, model_name, items, summary_prompt)
         if summary:
             summaries.append(summary)
 
     return summaries
 
 
-def _summarize_cluster(model, items: List[Dict]) -> Optional[Dict]:
+def _summarize_cluster(client, model_name: str, items: List[Dict], prompt: str) -> Optional[Dict]:
     sources = sorted({item.get("source", "") for item in items if item.get("source")})
     titles = [item.get("title", "") for item in items if item.get("title")]
     sample_title = titles[0] if titles else ""
@@ -323,16 +341,6 @@ def _summarize_cluster(model, items: List[Dict]) -> Optional[Dict]:
             "source": item.get("source", ""),
         })
 
-    prompt = """
-你是新闻播报助手，请根据提供的多平台信息，输出 JSON。
-要求：
-- summary: 2-3 句，保持中立。
-- short_summary: 1 句，保持中立。
-- priority_score: 0-100。
-- title: 事件标题（简短）。
-只输出 JSON，不要多余文本。
-"""
-
     payload = {
         "sample_title": sample_title,
         "sources": sources,
@@ -346,11 +354,31 @@ def _summarize_cluster(model, items: List[Dict]) -> Optional[Dict]:
     }
 
     try:
-        response = model.generate_content(
-            f"{prompt}\n数据: {json.dumps(payload, ensure_ascii=False)}",
-            generation_config={"temperature": 0.3},
-        )
-        text = response.text.strip()
+        request_text = f"{prompt}\n数据: {json.dumps(payload, ensure_ascii=False)}"
+        try:
+            from google.genai import types
+        except Exception:
+            types = None
+
+        if types is not None:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=request_text,
+                    config=types.GenerateContentConfig(temperature=0.3),
+                )
+            except TypeError:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=request_text,
+                )
+        else:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=request_text,
+            )
+
+        text = (getattr(response, "text", "") or "").strip()
         data = _safe_json_from_text(text)
         if not data:
             return None
@@ -379,17 +407,12 @@ def _build_script_segments(summaries: List[Dict], config: Dict) -> List[Dict]:
     if not summaries:
         return []
 
-    timezone = config.get("TIMEZONE", "Asia/Shanghai")
-    now = get_configured_time(timezone)
-    date_label = now.strftime("%m-%d %H:%M")
-
     summaries_sorted = sorted(summaries, key=lambda s: s.get("priority_score", 0), reverse=True)
     high_count = max(1, math.ceil(len(summaries_sorted) * 0.3))
 
     segments = []
     intro = (
-        f"主持人：大家好，这里是今日热点简报，时间 {date_label}。"
-        "提示：本播报来源于公开信息，内容可能需要核实。"
+        f"欢迎来到今日的热点简报。"
     )
     segments.append({"text": intro, "chapter": None})
 
@@ -402,11 +425,6 @@ def _build_script_segments(summaries: List[Dict], config: Dict) -> List[Dict]:
         if not summary_text:
             continue
 
-        summary_text = _format_dialogue(summary_text)
-        sources_text = "、".join(item.get("sources", []))
-        if sources_text:
-            summary_text = f"{summary_text} 来源包括：{sources_text}。"
-
         segments.append({
             "text": summary_text,
             "chapter": {
@@ -415,28 +433,29 @@ def _build_script_segments(summaries: List[Dict], config: Dict) -> List[Dict]:
             },
         })
 
-    outro = "主持人：以上是今天的热点简报，提醒大家结合原始来源核实信息。"
+    outro = "以上是今天的热点简报，本播报来源于公开信息，内容可能需要核实。"
     segments.append({"text": outro, "chapter": None})
 
     return segments
 
 
-def _format_dialogue(text: str) -> str:
-    sentences = [s.strip() for s in re.split(r"(?<=[。！？])", text) if s.strip()]
-    if not sentences:
-        return text
-
-    parts = []
-    speakers = ["主持人", "搭档"]
-    for idx, sentence in enumerate(sentences):
-        speaker = speakers[idx % 2]
-        parts.append(f"{speaker}：{sentence}")
-    return " ".join(parts)
+def _write_transcript(segments: List[Dict], path: Path) -> None:
+    lines = []
+    for segment in segments:
+        text = segment.get("text", "").strip()
+        if text:
+            lines.append(text)
+    if not lines:
+        return
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict) -> Tuple[List[Path], List[float]]:
     endpoint = tts_cfg.get("ENDPOINT", "")
     provider = (tts_cfg.get("PROVIDER") or "").strip().lower()
+
+    if provider in {"sherpa_onnx", "sherpa"}:
+        return _synthesize_segments_sherpa_onnx(segments, segment_dir, tts_cfg)
 
     if _is_hf_space_endpoint(endpoint, provider):
         audio_segments, durations = _synthesize_segments_hf_space(segments, segment_dir, endpoint)
@@ -513,6 +532,73 @@ def _synthesize_segments_gradio(
             durations.append(_probe_duration(segment_path))
         except Exception:
             continue
+
+    return audio_segments, durations
+
+
+def _synthesize_segments_sherpa_onnx(
+    segments: List[Dict],
+    segment_dir: Path,
+    tts_cfg: Dict,
+) -> Tuple[List[Path], List[float]]:
+    try:
+        import sherpa_onnx
+    except ImportError:
+        print("[音频播报] 未安装 sherpa-onnx，跳过 TTS")
+        return [], []
+
+    model_cfg = tts_cfg.get("SHERPA_ONNX", {})
+    if not model_cfg:
+        print("[音频播报] 未配置 Sherpa-ONNX，跳过 TTS")
+        return [], []
+
+    model_dir = model_cfg.get("MODEL_DIR", "")
+    matcha_model = _resolve_model_path(model_dir, model_cfg.get("ACOUSTIC_MODEL", ""))
+    vocoder = _resolve_model_path(model_dir, model_cfg.get("VOCODER", ""))
+    tokens = _resolve_model_path(model_dir, model_cfg.get("TOKENS", ""))
+    lexicon = _resolve_model_path(model_dir, model_cfg.get("LEXICON", ""))
+    data_dir = _resolve_model_path(model_dir, model_cfg.get("DATA_DIR", ""))
+
+    rule_fsts = _resolve_rule_fsts(model_dir, model_cfg.get("RULE_FSTS", ""))
+
+    tts_config = sherpa_onnx.OfflineTtsConfig(
+        model=sherpa_onnx.OfflineTtsModelConfig(
+            matcha=sherpa_onnx.OfflineTtsMatchaModelConfig(
+                acoustic_model=matcha_model,
+                vocoder=vocoder,
+                lexicon=lexicon,
+                tokens=tokens,
+                data_dir=data_dir,
+            ),
+            provider=model_cfg.get("PROVIDER", "cpu"),
+            num_threads=int(model_cfg.get("NUM_THREADS", 2)),
+            debug=False,
+        ),
+        rule_fsts=rule_fsts,
+        max_num_sentences=int(model_cfg.get("MAX_NUM_SENTENCES", 0)),
+    )
+
+    if not tts_config.validate():
+        print("[音频播报] Sherpa-ONNX 配置校验失败")
+        return [], []
+
+    tts = sherpa_onnx.OfflineTts(tts_config)
+    sid = int(model_cfg.get("SID", 0))
+    speed = float(model_cfg.get("SPEED", 1.0))
+
+    audio_segments = []
+    durations = []
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        audio = tts.generate(text, sid=sid, speed=speed)
+        if not getattr(audio, "samples", None):
+            continue
+        segment_path = segment_dir / f"segment_{idx:03d}.wav"
+        if _write_wave(segment_path, audio.samples, audio.sample_rate):
+            audio_segments.append(segment_path)
+            durations.append(len(audio.samples) / audio.sample_rate)
 
     return audio_segments, durations
 
@@ -626,6 +712,62 @@ def _normalize_space_endpoint(endpoint: str) -> str:
     if endpoint.startswith("hf://"):
         return endpoint.replace("hf://", "")
     return endpoint
+
+
+def _resolve_model_path(model_dir: str, path_value: str) -> str:
+    if not path_value:
+        return ""
+    path = Path(path_value)
+    if path.is_absolute():
+        return str(path)
+    if model_dir:
+        return str(Path(model_dir) / path_value)
+    return str(path)
+
+
+def _resolve_rule_fsts(model_dir: str, value: str) -> str:
+    if not value:
+        return ""
+    paths = []
+    for raw in value.split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        paths.append(_resolve_model_path(model_dir, raw))
+    return ",".join(paths)
+
+
+def _write_wave(path: Path, samples, sample_rate: int) -> bool:
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    try:
+        if np is not None:
+            data = np.asarray(samples, dtype=np.float32)
+            data = np.clip(data, -1.0, 1.0)
+            pcm = (data * 32767.0).astype(np.int16)
+            frames = pcm.tobytes()
+        else:
+            from array import array
+
+            pcm = array("h")
+            for value in samples:
+                value = max(-1.0, min(1.0, float(value)))
+                pcm.append(int(value * 32767.0))
+            frames = pcm.tobytes()
+
+        import wave
+
+        with wave.open(str(path), "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(int(sample_rate))
+            wav_file.writeframes(frames)
+        return True
+    except Exception:
+        return False
 
 
 def _default_space_args(text: str) -> List:
@@ -749,7 +891,8 @@ def _concat_audio(segment_paths: List[Path], output_path: Path) -> bool:
     concat_file = output_path.parent / "concat_list.txt"
     with open(concat_file, "w", encoding="utf-8") as handle:
         for path in segment_paths:
-            handle.write(f"file '{path.as_posix()}'\n")
+            abs_path = path.resolve()
+            handle.write(f"file '{abs_path.as_posix()}'\n")
 
     cmd = [
         ffmpeg,

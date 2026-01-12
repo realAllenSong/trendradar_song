@@ -216,6 +216,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
     """加载音频播报配置"""
     audio = config_data.get("audio", {})
     tts = audio.get("tts", {})
+    sherpa_onnx = tts.get("sherpa_onnx", {})
     output = audio.get("output", {})
 
     enabled_env = _get_env_bool("AUDIO_ENABLED")
@@ -225,6 +226,11 @@ def _load_audio_config(config_data: Dict) -> Dict:
     embedding_model_env = _get_env_str("AUDIO_EMBEDDING_MODEL")
     embedding_sim_env = os.environ.get("AUDIO_EMBEDDING_SIM_THRESHOLD", "").strip()
     fuzzy_sim_env = os.environ.get("AUDIO_FUZZY_SIM_THRESHOLD", "").strip()
+    summary_prompt_env = os.environ.get("AUDIO_SUMMARY_PROMPT", "")
+    sherpa_sid_env = os.environ.get("SHERPA_ONNX_SID", "").strip()
+    sherpa_speed_env = os.environ.get("SHERPA_ONNX_SPEED", "").strip()
+    sherpa_threads_env = os.environ.get("SHERPA_ONNX_NUM_THREADS", "").strip()
+    sherpa_max_sent_env = os.environ.get("SHERPA_ONNX_MAX_NUM_SENTENCES", "").strip()
 
     def _parse_float(value: str, default: float) -> float:
         try:
@@ -240,20 +246,36 @@ def _load_audio_config(config_data: Dict) -> Dict:
         "EMBEDDING_MODEL": embedding_model_env or audio.get("embedding_model", "intfloat/multilingual-e5-small"),
         "EMBEDDING_SIM_THRESHOLD": _parse_float(embedding_sim_env, audio.get("embedding_sim_threshold", 0.82)),
         "FUZZY_SIM_THRESHOLD": _parse_float(fuzzy_sim_env, audio.get("fuzzy_sim_threshold", 90)),
-        "GEMINI_MODEL": _get_env_str("GEMINI_MODEL") or audio.get("gemini_model", "gemini-1.5-flash"),
+        "GEMINI_MODEL": _get_env_str("GEMINI_MODEL") or audio.get("gemini_model", "gemini-3-flash-preview"),
         "GEMINI_API_KEY": _get_env_str("GEMINI_API_KEY") or audio.get("gemini_api_key", ""),
+        "SUMMARY_PROMPT": summary_prompt_env if summary_prompt_env.strip() else audio.get("summary_prompt", ""),
         "TTS": {
             "PROVIDER": _get_env_str("INDEXTTS_PROVIDER") or tts.get("provider", ""),
             "ENDPOINT": _get_env_str("INDEXTTS_ENDPOINT") or tts.get("endpoint", ""),
             "API_KEY": _get_env_str("INDEXTTS_API_KEY") or tts.get("api_key", ""),
             "VOICE": _get_env_str("INDEXTTS_VOICE") or tts.get("voice", "default"),
             "FORMAT": _get_env_str("INDEXTTS_FORMAT") or tts.get("format", "mp3"),
+            "SHERPA_ONNX": {
+                "MODEL_DIR": _get_env_str("SHERPA_ONNX_MODEL_DIR") or sherpa_onnx.get("model_dir", ""),
+                "ACOUSTIC_MODEL": _get_env_str("SHERPA_ONNX_ACOUSTIC_MODEL") or sherpa_onnx.get("acoustic_model", ""),
+                "VOCODER": _get_env_str("SHERPA_ONNX_VOCODER") or sherpa_onnx.get("vocoder", ""),
+                "TOKENS": _get_env_str("SHERPA_ONNX_TOKENS") or sherpa_onnx.get("tokens", ""),
+                "LEXICON": _get_env_str("SHERPA_ONNX_LEXICON") or sherpa_onnx.get("lexicon", ""),
+                "RULE_FSTS": _get_env_str("SHERPA_ONNX_RULE_FSTS") or sherpa_onnx.get("rule_fsts", ""),
+                "DATA_DIR": _get_env_str("SHERPA_ONNX_DATA_DIR") or sherpa_onnx.get("data_dir", ""),
+                "SID": int(sherpa_sid_env) if sherpa_sid_env else sherpa_onnx.get("sid", 0),
+                "SPEED": _parse_float(sherpa_speed_env, sherpa_onnx.get("speed", 1.0)),
+                "NUM_THREADS": int(sherpa_threads_env) if sherpa_threads_env else sherpa_onnx.get("num_threads", 2),
+                "PROVIDER": _get_env_str("SHERPA_ONNX_PROVIDER") or sherpa_onnx.get("provider", "cpu"),
+                "MAX_NUM_SENTENCES": int(sherpa_max_sent_env) if sherpa_max_sent_env else sherpa_onnx.get("max_num_sentences", 0),
+            },
         },
         "OUTPUT": {
             "DIR": output.get("dir", "output/audio"),
             "PUBLIC_DIR": output.get("public_dir", "audio"),
             "FILENAME": output.get("filename", "latest.mp3"),
             "CHAPTERS_FILENAME": output.get("chapters_filename", "chapters.json"),
+            "TRANSCRIPT_FILENAME": output.get("transcript_filename", "transcript.txt"),
         },
     }
 

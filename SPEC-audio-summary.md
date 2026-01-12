@@ -80,8 +80,7 @@ Intro: "Brief note: This summary is generated from public sources and may requir
 Outro: "Reminder: Please verify details with original sources."
 
 Model defaults (configurable):
-- `gemini-1.5-flash` for cost-efficient summarization.
-- Option to switch to `gemini-1.5-pro` for higher quality.
+- `gemini-3-flash-preview` for cost-efficient summarization.
 
 ### 6) Script Assembly
 Single-host, conversational tone (simulated dialogue style without multiple voices).
@@ -159,7 +158,7 @@ Proposed config keys (in `config.yaml` or `.env`):
 
 ## Dependencies
 - Python: `requests`, `sentence-transformers`, `rapidfuzz`, `numpy`
-- Gemini: `google-generativeai`
+- Gemini: `google-genai`
 - Audio: `ffmpeg` (for concatenation) or `pydub` (requires ffmpeg)
 
 ## Failure Handling

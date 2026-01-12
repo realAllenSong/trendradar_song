@@ -10,6 +10,41 @@ fi
 # 保存环境变量
 env >> /etc/environment
 
+if [ "${AUTO_DOWNLOAD_SHERPA_ONNX:-true}" = "true" ]; then
+    MODEL_DIR=$(/usr/local/bin/python - <<'PY'
+import os
+import sys
+import yaml
+
+cfg_path = os.environ.get("CONFIG_PATH", "/app/config/config.yaml")
+try:
+    with open(cfg_path, "r", encoding="utf-8") as handle:
+        data = yaml.safe_load(handle) or {}
+except Exception:
+    sys.exit(0)
+
+audio = data.get("audio", {})
+tts = audio.get("tts", {})
+provider = str(tts.get("provider", "")).lower()
+if provider != "sherpa_onnx":
+    sys.exit(0)
+
+model_dir = os.environ.get("SHERPA_ONNX_MODEL_DIR") or tts.get("sherpa_onnx", {}).get(
+    "model_dir",
+    "models/sherpa-onnx/matcha-icefall-zh-en",
+)
+print(model_dir)
+PY
+    )
+
+    if [ -n "${MODEL_DIR}" ]; then
+        echo "⬇️  下载 Sherpa-ONNX 模型到 ${MODEL_DIR}"
+        if ! /usr/local/bin/python /app/tools/download_sherpa_onnx_model.py --output-dir "${MODEL_DIR}"; then
+            echo "⚠️  模型下载失败，继续运行（音频可能不可用）"
+        fi
+    fi
+fi
+
 case "${RUN_MODE:-cron}" in
 "once")
     echo "🔄 单次执行"

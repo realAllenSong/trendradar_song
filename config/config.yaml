@@ -144,20 +144,41 @@ audio:
   embedding_sim_threshold: 0.82
   fuzzy_sim_threshold: 90
   gemini_model: "gemini-3-flash-preview"
-  gemini_api_key: "AIzaSyD33wySeMXQikgpxfpG0sec2mGQKNQY0qU"   # 也可用环境变量 GEMINI_API_KEY
+  gemini_api_key: ""   # 也可用环境变量 GEMINI_API_KEY
+  summary_prompt: |
+    你是新闻播报助手，请根据提供的多平台信息，输出 JSON。
+    要求：
+    - summary: 2-3 句，保持中立。
+    - short_summary: 1 句，保持中立。
+    - priority_score: 0-100。
+    - title: 事件标题（简短）。
+    只输出 JSON，不要多余文本。
 
   tts:
-    provider: ""                      # 可选: hf_space | http (留空自动判断)
+    provider: "sherpa_onnx"           # 可选: sherpa_onnx | hf_space | http
     endpoint: ""                      # IndexTTS 服务地址
     api_key: ""                       # 可选
     voice: "default"
     format: "mp3"
+    sherpa_onnx:
+      model_dir: "models/sherpa-onnx/matcha-icefall-zh-en"
+      acoustic_model: "model-steps-3.onnx"
+      vocoder: "vocos-16khz-univ.onnx"
+      tokens: "tokens.txt"
+      lexicon: "lexicon.txt"
+      rule_fsts: "phone-zh.fst,number-zh.fst,date-zh.fst"
+      data_dir: "espeak-ng-data"
+      sid: 0
+      speed: 1.0
+      num_threads: 2
+      provider: "cpu"
 
   output:
     dir: "output/audio"
     public_dir: "audio"
     filename: "latest.mp3"
     chapters_filename: "chapters.json"
+    transcript_filename: "transcript.txt"
 
 
 # ===============================================================

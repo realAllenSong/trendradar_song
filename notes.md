@@ -35,6 +35,8 @@
 ### Implementation Notes
 - Audio pipeline gated by file mtime (12h interval).
 - HTML player loads audio/chapters at runtime and hides if unavailable.
-- IndexTTS can be called via HF Space `/gradio_api/call` (with gradio_client fallback) or HTTP endpoint.
+- IndexTTS can be called via HF Space `/gradio_api/call` (gradio_client fallback is optional and not in base requirements due to websockets conflict).
 - Probe against IndexTTS official Space returned `API call failed` for `/gen_single` (Space may reject API calls or be unavailable).
 - Dropped heavy embedding dependencies from base install to avoid GitHub Actions disk errors; fuzzy clustering is used when embeddings are unavailable.
+- Sherpa-ONNX Matcha TTS added for CPU-only synthesis; model download is handled via `tools/download_sherpa_onnx_model.py` (uses 16k vocoder).
+- Docker entrypoint will auto-download Sherpa-ONNX models when enabled (override with `AUTO_DOWNLOAD_SHERPA_ONNX=false`); failures no longer crash the container.
