@@ -79,6 +79,11 @@ jobs:
             exit 1
           fi
 
+      - name: Force regen audio
+        if: success()
+        run: |
+          rm -f audio/latest.mp3 audio/chapters.json audio/transcript.txt
+
       - name: Run crawler
         if: success()
         env:
