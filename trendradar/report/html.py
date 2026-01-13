@@ -170,6 +170,8 @@ def render_html_content(
     )
     placeholder_image = _PLACEHOLDER_IMAGE_DATA_URI
     escaped_placeholder_image = html_escape(placeholder_image)
+    report_time = get_time_func() if get_time_func else datetime.now()
+    audio_cache_bust = report_time.strftime("%Y%m%d%H%M%S")
     html = """
     <!DOCTYPE html>
     <html>
@@ -1721,12 +1723,7 @@ def render_html_content(
                         <span class="info-label">生成时间</span>
                         <span class="info-value">"""
 
-    # 使用提供的时间函数或默认 datetime.now
-    if get_time_func:
-        now = get_time_func()
-    else:
-        now = datetime.now()
-    html += now.strftime("%m-%d %H:%M")
+    html += report_time.strftime("%m-%d %H:%M")
 
     html += """</span>
                     </div>
@@ -2140,6 +2137,7 @@ def render_html_content(
                 const shell = document.getElementById('audioShell');
                 if (!audio || !shell) return;
 
+                const audioVersion = '""" + audio_cache_bust + """';
                 const playBtn = document.getElementById('audioPlay');
                 const progress = document.getElementById('audioProgress');
                 const currentEl = document.getElementById('audioCurrent');
@@ -2148,7 +2146,9 @@ def render_html_content(
                 const chaptersPanel = document.getElementById('audioChapters');
                 const chaptersList = document.getElementById('chaptersList');
 
-                const audioSrc = audio.getAttribute('src');
+                const audioBaseSrc = audio.getAttribute('src');
+                const audioSrc = `${audioBaseSrc}?v=${audioVersion}`;
+                audio.src = audioSrc;
                 let metadataReady = false;
                 let audioBlobUrl = null;
                 let pendingSeek = null;
@@ -2202,7 +2202,7 @@ def render_html_content(
                 }
 
                 function loadChapters() {
-                    fetch('audio/chapters.json').then((res) => res.json()).then((data) => {
+                    fetch(`audio/chapters.json?v=${audioVersion}`).then((res) => res.json()).then((data) => {
                         if (!Array.isArray(data) || data.length === 0) return;
                         chaptersList.innerHTML = '';
                         data.forEach((chapter) => {
