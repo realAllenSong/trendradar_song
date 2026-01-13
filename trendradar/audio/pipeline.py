@@ -69,8 +69,7 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     public_audio_path = public_dir / filename
     output_chapters_path = output_dir / chapters_filename
     public_chapters_path = public_dir / chapters_filename
-    output_transcript_path = output_dir / transcript_filename
-    public_transcript_path = public_dir / transcript_filename
+    transcript_path = public_dir / transcript_filename
 
     if not _should_generate_audio(public_audio_path, audio_cfg.get("INTERVAL_HOURS", 12)):
         return AudioResult(str(public_audio_path), str(public_chapters_path), generated=False)
@@ -111,12 +110,10 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
             print("[音频播报] 音频脚本为空，跳过")
             return None
 
-        _write_transcript(segments, output_transcript_path)
-        shutil.copyfile(output_transcript_path, public_transcript_path)
+        _write_transcript(segments, transcript_path)
 
         segments = _dedupe_transcript_segments(segments, audio_cfg, gemini_key)
-        _write_transcript(segments, output_transcript_path)
-        shutil.copyfile(output_transcript_path, public_transcript_path)
+        _write_transcript(segments, transcript_path)
 
         segment_dir = output_dir / "segments"
         segment_dir.mkdir(parents=True, exist_ok=True)
