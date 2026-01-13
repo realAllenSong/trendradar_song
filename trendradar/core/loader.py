@@ -216,6 +216,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
     """加载音频播报配置"""
     audio = config_data.get("audio", {})
     tts = audio.get("tts", {})
+    kokoro = tts.get("kokoro", {})
     sherpa_onnx = tts.get("sherpa_onnx", {})
     output = audio.get("output", {})
 
@@ -227,10 +228,14 @@ def _load_audio_config(config_data: Dict) -> Dict:
     embedding_sim_env = os.environ.get("AUDIO_EMBEDDING_SIM_THRESHOLD", "").strip()
     fuzzy_sim_env = os.environ.get("AUDIO_FUZZY_SIM_THRESHOLD", "").strip()
     summary_prompt_env = os.environ.get("AUDIO_SUMMARY_PROMPT", "")
+    dedupe_enabled_env = _get_env_bool("AUDIO_DEDUPE_ENABLED")
+    dedupe_prompt_env = os.environ.get("AUDIO_DEDUPE_PROMPT", "")
     sherpa_sid_env = os.environ.get("SHERPA_ONNX_SID", "").strip()
     sherpa_speed_env = os.environ.get("SHERPA_ONNX_SPEED", "").strip()
     sherpa_threads_env = os.environ.get("SHERPA_ONNX_NUM_THREADS", "").strip()
     sherpa_max_sent_env = os.environ.get("SHERPA_ONNX_MAX_NUM_SENTENCES", "").strip()
+    kokoro_speed_env = os.environ.get("KOKORO_SPEED", "").strip()
+    kokoro_sample_rate_env = _get_env_int("KOKORO_SAMPLE_RATE")
 
     def _parse_float(value: str, default: float) -> float:
         try:
@@ -249,12 +254,21 @@ def _load_audio_config(config_data: Dict) -> Dict:
         "GEMINI_MODEL": _get_env_str("GEMINI_MODEL") or audio.get("gemini_model", "gemini-3-flash-preview"),
         "GEMINI_API_KEY": _get_env_str("GEMINI_API_KEY") or audio.get("gemini_api_key", ""),
         "SUMMARY_PROMPT": summary_prompt_env if summary_prompt_env.strip() else audio.get("summary_prompt", ""),
+        "DEDUP_ENABLED": dedupe_enabled_env if dedupe_enabled_env is not None else audio.get("dedupe_enabled", True),
+        "DEDUP_PROMPT": dedupe_prompt_env if dedupe_prompt_env.strip() else audio.get("dedupe_prompt", ""),
         "TTS": {
             "PROVIDER": _get_env_str("INDEXTTS_PROVIDER") or tts.get("provider", ""),
             "ENDPOINT": _get_env_str("INDEXTTS_ENDPOINT") or tts.get("endpoint", ""),
             "API_KEY": _get_env_str("INDEXTTS_API_KEY") or tts.get("api_key", ""),
             "VOICE": _get_env_str("INDEXTTS_VOICE") or tts.get("voice", "default"),
             "FORMAT": _get_env_str("INDEXTTS_FORMAT") or tts.get("format", "mp3"),
+            "KOKORO": {
+                "LANG_CODE": _get_env_str("KOKORO_LANG_CODE") or kokoro.get("lang_code", "z"),
+                "VOICE": _get_env_str("KOKORO_VOICE") or kokoro.get("voice", "zm_yunyang"),
+                "SPEED": _parse_float(kokoro_speed_env, kokoro.get("speed", 1.0)),
+                "SPLIT_PATTERN": _get_env_str("KOKORO_SPLIT_PATTERN") or kokoro.get("split_pattern", r"\n+"),
+                "SAMPLE_RATE": kokoro_sample_rate_env or kokoro.get("sample_rate", 24000),
+            },
             "SHERPA_ONNX": {
                 "MODEL_DIR": _get_env_str("SHERPA_ONNX_MODEL_DIR") or sherpa_onnx.get("model_dir", ""),
                 "ACOUSTIC_MODEL": _get_env_str("SHERPA_ONNX_ACOUSTIC_MODEL") or sherpa_onnx.get("acoustic_model", ""),

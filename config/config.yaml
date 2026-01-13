@@ -145,6 +145,15 @@ audio:
   fuzzy_sim_threshold: 90
   gemini_model: "gemini-3-flash-preview"
   gemini_api_key: ""   # 也可用环境变量 GEMINI_API_KEY
+  dedupe_enabled: true
+  dedupe_prompt: |
+    你是文本去重助手，请对输入的新闻播报文本列表去重，只删除重复或明显近似的条目。
+    要求：
+    - 保持原始顺序。
+    - 将所有英文单词翻译为中文(或相同的笼统意思,比如A股换成国内股市)，无法翻译时用中文概括替代。
+    - 输出文本只能包含中文和数字（可包含中文标点）。
+    - 只输出 JSON，不要多余文本。
+    - 输出格式: {"items":[{"id":0,"text":"..."}]}
   summary_prompt: |
     你是新闻播报助手，请根据提供的多平台信息，输出 JSON。
     要求：
@@ -155,11 +164,17 @@ audio:
     只输出 JSON，不要多余文本。
 
   tts:
-    provider: "sherpa_onnx"           # 可选: sherpa_onnx | hf_space | http
+    provider: "kokoro"               # 可选: kokoro | sherpa_onnx | hf_space | http
     endpoint: ""                      # IndexTTS 服务地址
     api_key: ""                       # 可选
     voice: "default"
     format: "mp3"
+    kokoro:
+      lang_code: "z"
+      voice: "zm_yunyang"
+      speed: 1.0
+      split_pattern: "\\n+"
+      sample_rate: 24000
     sherpa_onnx:
       model_dir: "models/sherpa-onnx/matcha-icefall-zh-en"
       acoustic_model: "model-steps-3.onnx"

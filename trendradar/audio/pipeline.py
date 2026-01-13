@@ -39,6 +39,16 @@ DEFAULT_SUMMARY_PROMPT = """
 只输出 JSON，不要多余文本。
 """
 
+DEFAULT_DEDUPE_PROMPT = """
+你是文本去重助手，请对输入的新闻播报文本列表去重，只删除重复或明显近似的条目。
+要求：
+- 保持原始顺序。
+- 将所有英文单词翻译为中文(或相同的笼统意思,比如A股换成国内股市)，无法翻译时用中文概括替代。
+- 输出文本只能包含中文和数字（可包含中文标点）。
+- 只返回 JSON，不要多余文本。
+- 输出格式: {"items":[{"id":0,"text":"..."}]}
+"""
+
 
 def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResult]:
     audio_cfg = config.get("AUDIO", {})
@@ -69,12 +79,12 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     tts_cfg = audio_cfg.get("TTS", {})
     tts_endpoint = tts_cfg.get("ENDPOINT", "").strip()
     provider = (tts_cfg.get("PROVIDER") or "").strip().lower()
-    use_sherpa = provider in {"sherpa_onnx", "sherpa"}
+    use_local_tts = provider in {"sherpa_onnx", "sherpa", "kokoro"}
 
     if not gemini_key:
         print("[音频播报] 未配置 GEMINI_API_KEY，跳过音频生成")
         return None
-    if not use_sherpa and not tts_endpoint:
+    if not use_local_tts and not tts_endpoint:
         print("[音频播报] 未配置 TTS endpoint，跳过音频生成")
         return None
 
@@ -101,6 +111,10 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
             print("[音频播报] 音频脚本为空，跳过")
             return None
 
+        _write_transcript(segments, output_transcript_path)
+        shutil.copyfile(output_transcript_path, public_transcript_path)
+
+        segments = _dedupe_transcript_segments(segments, audio_cfg, gemini_key)
         _write_transcript(segments, output_transcript_path)
         shutil.copyfile(output_transcript_path, public_transcript_path)
 
@@ -322,6 +336,119 @@ def _summarize_clusters(clusters: List[Dict], audio_cfg: Dict, api_key: str) -> 
     return summaries
 
 
+def _dedupe_transcript_segments(segments: List[Dict], audio_cfg: Dict, api_key: str) -> List[Dict]:
+    if not audio_cfg.get("DEDUP_ENABLED", True):
+        return segments
+    if len(segments) < 3:
+        return segments
+
+    items = []
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        items.append({"id": idx, "text": text})
+
+    if len(items) < 3:
+        return segments
+
+    try:
+        from google import genai
+    except ImportError:
+        print("[音频播报] 未安装 google-genai，跳过去重")
+        return segments
+
+    model_name = audio_cfg.get("GEMINI_MODEL", "gemini-1.5-flash")
+    dedupe_prompt = (audio_cfg.get("DEDUP_PROMPT") or "").strip() or DEFAULT_DEDUPE_PROMPT.strip()
+
+    client = genai.Client(api_key=api_key)
+    request_text = f"{dedupe_prompt}\n数据: {json.dumps(items, ensure_ascii=False)}"
+
+    try:
+        try:
+            from google.genai import types
+        except Exception:
+            types = None
+
+        if types is not None:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=request_text,
+                    config=types.GenerateContentConfig(temperature=0.1),
+                )
+            except TypeError:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=request_text,
+                )
+        else:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=request_text,
+            )
+        text = (getattr(response, "text", "") or "").strip()
+    except Exception:
+        return segments
+
+    data = _safe_json_from_text(text)
+    if not data:
+        return segments
+
+    keep_ids = None
+    rewrite_map: Dict[int, str] = {}
+    if isinstance(data.get("keep_ids"), list):
+        keep_ids = data.get("keep_ids")
+    elif isinstance(data.get("items"), list):
+        keep_ids = []
+        for item in data["items"]:
+            if not isinstance(item, dict):
+                continue
+            keep_ids.append(item.get("id"))
+            text_value = item.get("text")
+            if text_value:
+                try:
+                    rewrite_map[int(item.get("id"))] = str(text_value)
+                except (TypeError, ValueError):
+                    continue
+
+    if not keep_ids:
+        return segments
+
+    keep_set = set()
+    for value in keep_ids:
+        try:
+            keep_set.add(int(value))
+        except (TypeError, ValueError):
+            continue
+
+    if not keep_set:
+        return segments
+
+    filtered = []
+    for idx, segment in enumerate(segments):
+        if idx not in keep_set:
+            continue
+        updated = dict(segment)
+        if idx in rewrite_map:
+            updated_text = _sanitize_chinese_text(rewrite_map[idx])
+            if not updated_text:
+                updated_text = "该条新闻无法翻译，建议查看原文。"
+            updated["text"] = updated_text
+        else:
+            updated_text = _sanitize_chinese_text(updated.get("text", ""))
+            if not updated_text:
+                updated_text = "该条新闻无法翻译，建议查看原文。"
+            updated["text"] = updated_text
+        filtered.append(updated)
+    if not filtered:
+        return segments
+
+    if len(filtered) != len(segments):
+        print(f"[音频播报] 去重后保留 {len(filtered)}/{len(segments)} 条")
+    return filtered
+
+
 def _summarize_cluster(client, model_name: str, items: List[Dict], prompt: str) -> Optional[Dict]:
     sources = sorted({item.get("source", "") for item in items if item.get("source")})
     titles = [item.get("title", "") for item in items if item.get("title")]
@@ -403,6 +530,13 @@ def _safe_json_from_text(text: str) -> Optional[Dict]:
         return None
 
 
+def _sanitize_chinese_text(text: str) -> str:
+    cleaned = re.sub(r"[A-Za-z]+", "", text)
+    cleaned = re.sub(r"[^0-9\u4e00-\u9fff，。！？；：、（）《》【】“”‘’—…·\\s]+", "", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()
+
+
 def _build_script_segments(summaries: List[Dict], config: Dict) -> List[Dict]:
     if not summaries:
         return []
@@ -456,6 +590,8 @@ def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict)
 
     if provider in {"sherpa_onnx", "sherpa"}:
         return _synthesize_segments_sherpa_onnx(segments, segment_dir, tts_cfg)
+    if provider == "kokoro":
+        return _synthesize_segments_kokoro(segments, segment_dir, tts_cfg)
 
     if _is_hf_space_endpoint(endpoint, provider):
         audio_segments, durations = _synthesize_segments_hf_space(segments, segment_dir, endpoint)
@@ -599,6 +735,70 @@ def _synthesize_segments_sherpa_onnx(
         if _write_wave(segment_path, audio.samples, audio.sample_rate):
             audio_segments.append(segment_path)
             durations.append(len(audio.samples) / audio.sample_rate)
+
+    return audio_segments, durations
+
+
+def _synthesize_segments_kokoro(
+    segments: List[Dict],
+    segment_dir: Path,
+    tts_cfg: Dict,
+) -> Tuple[List[Path], List[float]]:
+    try:
+        from kokoro import KPipeline
+    except ImportError:
+        print("[音频播报] 未安装 kokoro，跳过 TTS")
+        return [], []
+
+    try:
+        import numpy as np
+    except ImportError:
+        np = None
+
+    kokoro_cfg = tts_cfg.get("KOKORO", {})
+    lang_code = kokoro_cfg.get("LANG_CODE", "z")
+    voice = kokoro_cfg.get("VOICE", "zm_yunyang")
+    speed = float(kokoro_cfg.get("SPEED", 1.0))
+    split_pattern = kokoro_cfg.get("SPLIT_PATTERN", r"\n+")
+    sample_rate = int(kokoro_cfg.get("SAMPLE_RATE", 24000))
+
+    try:
+        pipeline = KPipeline(lang_code=lang_code)
+    except Exception:
+        print("[音频播报] Kokoro 初始化失败")
+        return [], []
+
+    audio_segments = []
+    durations = []
+
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        try:
+            generator = pipeline(text, voice=voice, speed=speed, split_pattern=split_pattern)
+            chunks = []
+            for _, _, audio in generator:
+                if audio is None:
+                    continue
+                chunks.append(audio)
+            if not chunks:
+                continue
+
+            if np is not None:
+                chunks = [np.asarray(chunk, dtype="float32") for chunk in chunks]
+                samples = np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
+            else:
+                samples = []
+                for chunk in chunks:
+                    samples.extend(chunk)
+
+            segment_path = segment_dir / f"segment_{idx:03d}.wav"
+            if _write_audio_samples(segment_path, samples, sample_rate):
+                audio_segments.append(segment_path)
+                durations.append(len(samples) / sample_rate)
+        except Exception:
+            continue
 
     return audio_segments, durations
 
@@ -768,6 +968,19 @@ def _write_wave(path: Path, samples, sample_rate: int) -> bool:
         return True
     except Exception:
         return False
+
+
+def _write_audio_samples(path: Path, samples, sample_rate: int) -> bool:
+    try:
+        import soundfile as sf
+    except ImportError:
+        return _write_wave(path, samples, sample_rate)
+
+    try:
+        sf.write(str(path), samples, sample_rate)
+        return True
+    except Exception:
+        return _write_wave(path, samples, sample_rate)
 
 
 def _default_space_args(text: str) -> List:
