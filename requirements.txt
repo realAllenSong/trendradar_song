@@ -7,7 +7,6 @@ boto3>=1.35.0,<2.0.0
 feedparser>=6.0.0,<7.0.0
 rapidfuzz>=3.9.0,<4.0.0
 numpy>=1.26.0,<2.0.0
-sherpa-onnx>=1.12.20,<1.13.0
 google-genai>=0.1.0,<1.0.0
 kokoro>=0.9.4,<1.0.0
 soundfile>=0.12.1,<1.0.0

@@ -68,29 +68,8 @@ jobs:
         if: success()
         run: |
           python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.2.2+cpu
           pip install -r requirements.txt
-
-      - name: Cache Sherpa-ONNX models
-        if: success()
-        uses: actions/cache@v4
-        with:
-          path: models/sherpa-onnx
-          key: sherpa-onnx-${{ runner.os }}-matcha-icefall-zh-en-v1
-
-      - name: Download Sherpa-ONNX model
-        if: success()
-        run: |
-          python - <<'PY'
-          import yaml
-
-          with open("config/config.yaml", "r", encoding="utf-8") as handle:
-              data = yaml.safe_load(handle) or {}
-          provider = str(data.get("audio", {}).get("tts", {}).get("provider", "")).lower()
-          if provider != "sherpa_onnx":
-              print("Skip Sherpa-ONNX download (provider is not sherpa_onnx)")
-              raise SystemExit(0)
-          PY
-          python tools/download_sherpa_onnx_model.py
 
       - name: Verify required files
         if: success()
@@ -122,18 +101,6 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           INDEXTTS_ENDPOINT: ${{ secrets.INDEXTTS_ENDPOINT }}
           INDEXTTS_API_KEY: ${{ secrets.INDEXTTS_API_KEY }}
-          SHERPA_ONNX_MODEL_DIR: ${{ secrets.SHERPA_ONNX_MODEL_DIR }}
-          SHERPA_ONNX_ACOUSTIC_MODEL: ${{ secrets.SHERPA_ONNX_ACOUSTIC_MODEL }}
-          SHERPA_ONNX_VOCODER: ${{ secrets.SHERPA_ONNX_VOCODER }}
-          SHERPA_ONNX_TOKENS: ${{ secrets.SHERPA_ONNX_TOKENS }}
-          SHERPA_ONNX_LEXICON: ${{ secrets.SHERPA_ONNX_LEXICON }}
-          SHERPA_ONNX_RULE_FSTS: ${{ secrets.SHERPA_ONNX_RULE_FSTS }}
-          SHERPA_ONNX_DATA_DIR: ${{ secrets.SHERPA_ONNX_DATA_DIR }}
-          SHERPA_ONNX_SID: ${{ secrets.SHERPA_ONNX_SID }}
-          SHERPA_ONNX_SPEED: ${{ secrets.SHERPA_ONNX_SPEED }}
-          SHERPA_ONNX_NUM_THREADS: ${{ secrets.SHERPA_ONNX_NUM_THREADS }}
-          SHERPA_ONNX_PROVIDER: ${{ secrets.SHERPA_ONNX_PROVIDER }}
-          SHERPA_ONNX_MAX_NUM_SENTENCES: ${{ secrets.SHERPA_ONNX_MAX_NUM_SENTENCES }}
           STORAGE_BACKEND: auto
           LOCAL_RETENTION_DAYS: ${{ secrets.LOCAL_RETENTION_DAYS }}
           REMOTE_RETENTION_DAYS: ${{ secrets.REMOTE_RETENTION_DAYS }}
