@@ -6,6 +6,7 @@ TrendRadar 主程序
 支持: python -m trendradar
 """
 
+import json
 import os
 import webbrowser
 from pathlib import Path
@@ -21,6 +22,33 @@ from trendradar.crawler import DataFetcher
 from trendradar.audio import maybe_generate_audio
 from trendradar.storage import convert_crawl_results_to_news_data
 from trendradar.utils.time import is_within_days
+
+
+EXPORT_REPORT_ENV_KEYS = (
+    "TREND_RADAR_EXPORT_REPORT_PATH",
+    "TRENRADAR_EXPORT_REPORT_PATH",
+)
+EXPORT_CRAWL_ENV_KEYS = (
+    "TREND_RADAR_EXPORT_CRAWL_PATH",
+    "TRENRADAR_EXPORT_CRAWL_PATH",
+)
+AUDIO_REPORT_ENV_KEYS = (
+    "TREND_RADAR_AUDIO_REPORT_PATH",
+    "TRENRADAR_AUDIO_REPORT_PATH",
+)
+
+
+def _get_env_path(keys: Tuple[str, ...]) -> Optional[Path]:
+    for key in keys:
+        raw = os.environ.get(key, "").strip()
+        if raw:
+            return Path(raw).expanduser()
+    return None
+
+
+def _write_json(path: Path, payload: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def check_version_update(
@@ -333,8 +361,9 @@ class NewsAnalyzer:
                 self.ctx.rank_threshold,
             )
 
-        # 音频播报（可选）
-        if self.ctx.config.get("AUDIO", {}).get("ENABLED", False):
+        report_path = _get_env_path(EXPORT_REPORT_ENV_KEYS)
+        report_data = None
+        if report_path or self.ctx.config.get("AUDIO", {}).get("ENABLED", False):
             report_data = self.ctx.prepare_report(
                 stats=stats,
                 failed_ids=failed_ids,
@@ -342,6 +371,20 @@ class NewsAnalyzer:
                 id_to_name=id_to_name,
                 mode=mode,
             )
+            if report_path:
+                _write_json(report_path, report_data)
+                print(f"报告 JSON 已导出: {report_path}")
+
+        # 音频播报（可选）
+        if self.ctx.config.get("AUDIO", {}).get("ENABLED", False):
+            if report_data is None:
+                report_data = self.ctx.prepare_report(
+                    stats=stats,
+                    failed_ids=failed_ids,
+                    new_titles=new_titles,
+                    id_to_name=id_to_name,
+                    mode=mode,
+                )
             maybe_generate_audio(report_data, self.ctx.config)
 
         # HTML生成（如果启用）
@@ -621,6 +664,17 @@ class NewsAnalyzer:
         # 转换为 NewsData 格式并保存到存储后端
         crawl_time = self.ctx.format_time()
         crawl_date = self.ctx.format_date()
+        export_path = _get_env_path(EXPORT_CRAWL_ENV_KEYS)
+        if export_path:
+            payload = {
+                "results": results,
+                "id_to_name": id_to_name,
+                "failed_ids": failed_ids,
+                "crawl_time": crawl_time,
+                "crawl_date": crawl_date,
+            }
+            _write_json(export_path, payload)
+            print(f"爬虫 JSON 已导出: {export_path}")
         news_data = convert_crawl_results_to_news_data(
             results, id_to_name, failed_ids, crawl_time, crawl_date
         )
@@ -1166,6 +1220,22 @@ class NewsAnalyzer:
 def main():
     """主程序入口"""
     try:
+        audio_report_path = _get_env_path(AUDIO_REPORT_ENV_KEYS)
+        if audio_report_path:
+            if not audio_report_path.is_file():
+                raise FileNotFoundError(f"音频报告 JSON 不存在: {audio_report_path}")
+            config = load_config()
+            if not config.get("AUDIO", {}).get("ENABLED", False):
+                raise RuntimeError("音频配置未启用，请设置 AUDIO_ENABLED=true")
+            report_data = json.loads(audio_report_path.read_text(encoding="utf-8"))
+            if not isinstance(report_data, dict):
+                raise RuntimeError("音频报告 JSON 格式错误")
+            result = maybe_generate_audio(report_data, config)
+            if not result or not result.generated:
+                raise RuntimeError("音频生成失败")
+            print(f"音频生成完成: {result.audio_path}")
+            return
+
         analyzer = NewsAnalyzer()
         analyzer.run()
     except FileNotFoundError as e:

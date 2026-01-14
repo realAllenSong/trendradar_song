@@ -1,3 +1,60 @@
+# Notes: Workflow Split + Action Stability Interview
+
+## Sources
+
+### User Interview (Answers)
+- Success metric: publish HTML and generate audio on schedule.
+- If TTS fails: HTML should still update; overall workflow should be marked not successful.
+- Split preference: open to split; wants safer approach around model cache/download.
+- Persisted outputs: raw crawl + summary JSON temporary; transcript/audio/chapters committed.
+- Audio cadence: every scheduled/manual run (12h).
+- Time limits: 60 min per stage; add more logging, no inactivity kill. Later clarified: overall workflow timeout target 60 min.
+- Retries: OK to add.
+- Concurrency: allow queueing (no cancel-in-progress).
+- Cache strategy: pick safest option if it meets goals.
+- External model storage: open to GitHub Releases if free; needs guidance.
+- Secrets scoping: unclear, needs explanation.
+- Add heartbeats/progress logs: yes.
+- Gemini failure: hard-fail.
+- Manual options: wants TTS-only/regenerate.
+- Retention/cost constraints: unknown.
+
+### Follow-up Answers
+- No TTS-only dispatch needed if workflow is split into jobs.
+- Temporary artifacts OK with 1 day retention.
+- Queueing: allow; add max overall workflow timeout 60 min (note GH Actions limitation).
+- Assets job can save cache immediately even if later jobs fail.
+- Model size: user asked to inspect repo or online.
+- Logging: heartbeat every 1 minute.
+- Timeouts: looser than 10s; retries OK.
+- Gemini failures: hard-fail, do not commit partial audio/transcript.
+
+### Local Model Size (repo)
+- `models` total: ~6.0G
+- `models/ONNX_Lab/models`: ~5.8G
+  - `onnx_models_quantized`: ~1.1G
+  - `VoxCPM1.5`: ~1.8G
+  - `ONNX_Lab`: ~2.9G (nested layout)
+- `models/sherpa-onnx`: ~195M
+
+### Logs
+- Exit code 143 with runner shutdown signal after ~28-50 minutes in `python -m trendradar`.
+- No output during long gap suggests hang in crawler/network or TTS compute.
+
+## Implementation Updates
+- Workflow split into assets/crawl/audio jobs with caches + 1-day artifacts.
+- Crawler timeouts/retries set via env: connect 20s, read 60s, retries 4, backoff 5-15s.
+- Audio timeouts/retries set via env: fetch 45s, Gemini retries 3, TTS 120/240s with retries 3.
+- Heartbeat logs now flush immediately for CI visibility.
+- No junk files with `*` or backticks found under `output/`.
+
+## Synthesized Findings (Draft)
+- Current workflow forces audio regeneration (`rm -f audio/...`) which removes interval gating.
+- Audio pipeline includes network fetch + embeddings + Gemini + TTS; GitHub runner CPU is slow.
+- No per-step timeout or heartbeat in `python -m trendradar`.
+
+---
+
 # Notes: Audio Summary Implementation
 
 ## Sources

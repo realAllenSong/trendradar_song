@@ -2,30 +2,26 @@ name: Get Hot News
 
 on:
   schedule:
-    # 📝 修改运行时间：只改第一个数字（0-59），表示每小时第几分钟运行
-    # 📝 Change time: Only modify the first number (0-59) = minute of each hour
-    #
-    # 示例 / Examples:
-    #   "15 * * * *"     → 每小时第15分钟 / minute 15 every hour
-    #   "30 0-14 * * *"  → 北京时间 8:00-22:00 每小时第30分钟 / Beijing 8am-10pm
-    #
+    # Change only the first number (minute) to adjust run time.
+    # Examples:
+    #   "15 * * * *"    -> at minute 15 each hour
+    #   "30 0-14 * * *" -> at minute 30, hours 0-14
     - cron: "33 */12 * * *"
 
   workflow_dispatch:
 
 concurrency:
   group: crawler-${{ github.ref_name }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
   actions: write
 
 jobs:
-  crawl:
+  assets:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
+    timeout-minutes: 60
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,75 +29,36 @@ jobs:
           fetch-depth: 1
           clean: true
 
-      - name: Cache VoxCPM models
-        if: success()
-        uses: actions/cache@v4
+      - name: Restore VoxCPM models cache
+        id: cache-voxcpm
+        uses: actions/cache/restore@v4
         with:
           path: models/ONNX_Lab/models
           key: voxcpm-models-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py') }}
           restore-keys: |
             voxcpm-models-${{ runner.os }}-
 
-      - name: Cache Hugging Face assets
-        if: success()
-        uses: actions/cache@v4
+      - name: Restore Hugging Face cache
+        id: cache-hf
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/huggingface
           key: hf-cache-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py', 'requirements.txt') }}
           restore-keys: |
             hf-cache-${{ runner.os }}-
 
-
-      # --------------------------------------------------------------------------------
-      # 🚦 TRAFFIC CONTROL / 流量控制
-      # --------------------------------------------------------------------------------
-      # EN: Generates a random delay between 1 and 300 seconds (5 minutes).
-      #     Critical for load balancing.
-      #
-      # CN: 生成 1 到 300 秒（5分钟）之间的随机延迟。
-      #     这对负载均衡至关重要。
-      # - name: Random Delay (Traffic Control)
-      #   if: success()
-      #   run: |
-      #     echo "🎲 Traffic Control: Generating random delay..."
-      #     DELAY=$(( ( RANDOM % 300 )  + 1 ))
-      #     echo "⏸️  Sleeping for ${DELAY} seconds to spread the load..."
-      #     sleep ${DELAY}s
-      #     echo "▶️  Delay finished. Starting crawler..."
-
       - name: Set up Python
-        if: success()
         uses: actions/setup-python@v5
         with:
           python-version: "3.10"
           cache: "pip"
 
-      - name: Install ffmpeg
-        if: success()
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y ffmpeg espeak-ng libsndfile1
-
-      - name: Install dependencies
-        if: success()
+      - name: Install minimal dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.2.2
-          pip install -r requirements.txt
-
-      - name: Prepare VoxCPM ONNX repo
-        if: success()
-        run: |
-          if [ ! -d models/ONNX_Lab ]; then
-            git clone --depth 1 https://github.com/realAllenSong/ONNX_Lab models/ONNX_Lab
-          fi
-
-          if [ ! -d models/ONNX_Lab/models/onnx_models_quantized ]; then
-            echo "VoxCPM ONNX models missing. Populate models/ONNX_Lab/models/onnx_models_quantized and models/ONNX_Lab/models/VoxCPM1.5."
-          fi
+          pip install pyyaml requests huggingface_hub tqdm
 
       - name: Ensure VoxCPM assets
-        if: success()
         env:
           CONFIG_PATH: config/config.yaml
           VOXCPM_ONNX_REPO: Oulasong/voxcpm-onnx
@@ -109,22 +66,77 @@ jobs:
         run: |
           python tools/ensure_voxcpm_assets.py
 
+      - name: Save VoxCPM models cache
+        if: steps.cache-voxcpm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: models/ONNX_Lab/models
+          key: voxcpm-models-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py') }}
+
+      - name: Save Hugging Face cache
+        if: steps.cache-hf.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-cache-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py', 'requirements.txt') }}
+
+  crawl:
+    runs-on: ubuntu-latest
+    needs: [assets]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+
+      - name: Restore VoxCPM models cache
+        uses: actions/cache/restore@v4
+        with:
+          path: models/ONNX_Lab/models
+          key: voxcpm-models-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py') }}
+          restore-keys: |
+            voxcpm-models-${{ runner.os }}-
+
+      - name: Restore Hugging Face cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-cache-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py', 'requirements.txt') }}
+          restore-keys: |
+            hf-cache-${{ runner.os }}-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.2.2
+          pip install -r requirements.txt
+
       - name: Verify required files
-        if: success()
         run: |
           if [ ! -f config/config.yaml ]; then
             echo "Error: Config missing"
             exit 1
           fi
 
-      - name: Force regen audio
-        if: success()
-        run: |
-          rm -f audio/latest.mp3 audio/chapters.json audio/transcript.txt
-
       - name: Run crawler
-        if: success()
         env:
+          AUDIO_ENABLED: "false"
+          TREND_RADAR_EXPORT_REPORT_PATH: output/report.json
+          TREND_RADAR_EXPORT_CRAWL_PATH: output/crawl.json
+          TREND_RADAR_HEARTBEAT_SECONDS: "60"
+          CRAWLER_CONNECT_TIMEOUT_SECONDS: "20"
+          CRAWLER_READ_TIMEOUT_SECONDS: "60"
+          CRAWLER_MAX_RETRIES: "4"
+          CRAWLER_RETRY_MIN_SECONDS: "5"
+          CRAWLER_RETRY_MAX_SECONDS: "15"
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -141,9 +153,6 @@ jobs:
           NTFY_TOKEN: ${{ secrets.NTFY_TOKEN }}
           BARK_URL: ${{ secrets.BARK_URL }}
           SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          INDEXTTS_ENDPOINT: ${{ secrets.INDEXTTS_ENDPOINT }}
-          INDEXTTS_API_KEY: ${{ secrets.INDEXTTS_API_KEY }}
           STORAGE_BACKEND: auto
           LOCAL_RETENTION_DAYS: ${{ secrets.LOCAL_RETENTION_DAYS }}
           REMOTE_RETENTION_DAYS: ${{ secrets.REMOTE_RETENTION_DAYS }}
@@ -155,6 +164,17 @@ jobs:
           GITHUB_ACTIONS: true
         run: python -m trendradar
 
+      - name: Upload crawl artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawl-output
+          path: |
+            output/report.json
+            output/crawl.json
+          retention-days: 1
+          if-no-files-found: warn
+
       - name: Commit index.html
         if: success()
         run: |
@@ -164,15 +184,6 @@ jobs:
           fi
 
           git add index.html
-          if [ -f audio/latest.mp3 ]; then
-            git add audio/latest.mp3
-          fi
-          if [ -f audio/chapters.json ]; then
-            git add audio/chapters.json
-          fi
-          if [ -f audio/transcript.txt ]; then
-            git add audio/transcript.txt
-          fi
 
           if git diff --cached --quiet; then
             echo "No changes to commit"
@@ -181,5 +192,106 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
           git commit -m "chore: update report"
+          git push
+
+  audio:
+    runs-on: ubuntu-latest
+    needs: [assets, crawl]
+    timeout-minutes: 60
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+          clean: true
+
+      - name: Restore VoxCPM models cache
+        uses: actions/cache/restore@v4
+        with:
+          path: models/ONNX_Lab/models
+          key: voxcpm-models-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py') }}
+          restore-keys: |
+            voxcpm-models-${{ runner.os }}-
+
+      - name: Restore Hugging Face cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-cache-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py', 'requirements.txt') }}
+          restore-keys: |
+            hf-cache-${{ runner.os }}-
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg espeak-ng libsndfile1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install --index-url https://download.pytorch.org/whl/cpu torch==2.2.2
+          pip install -r requirements.txt
+
+      - name: Download crawl artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: crawl-output
+          path: output
+
+      - name: Verify report artifact
+        run: |
+          if [ ! -f output/report.json ]; then
+            echo "report.json not found, abort"
+            exit 1
+          fi
+
+      - name: Run audio generation
+        env:
+          AUDIO_ENABLED: "true"
+          AUDIO_INTERVAL_HOURS: "0"
+          TREND_RADAR_AUDIO_REPORT_PATH: output/report.json
+          TREND_RADAR_HEARTBEAT_SECONDS: "60"
+          AUDIO_FETCH_TIMEOUT_SECONDS: "45"
+          AUDIO_FETCH_MAX_RETRIES: "3"
+          AUDIO_FETCH_RETRY_BACKOFF_SECONDS: "1.5"
+          AUDIO_GEMINI_MAX_RETRIES: "3"
+          AUDIO_GEMINI_BACKOFF_SECONDS: "2"
+          AUDIO_GEMINI_MAX_BACKOFF_SECONDS: "12"
+          AUDIO_TTS_TIMEOUT_SECONDS: "120"
+          AUDIO_TTS_EVENT_TIMEOUT_SECONDS: "240"
+          AUDIO_TTS_MAX_RETRIES: "3"
+          AUDIO_TTS_RETRY_BACKOFF_SECONDS: "2"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          INDEXTTS_ENDPOINT: ${{ secrets.INDEXTTS_ENDPOINT }}
+          INDEXTTS_API_KEY: ${{ secrets.INDEXTTS_API_KEY }}
+          GITHUB_ACTIONS: true
+        run: python -m trendradar
+
+      - name: Commit audio outputs
+        if: success()
+        run: |
+          if [ ! -f audio/latest.mp3 ]; then
+            echo "audio/latest.mp3 not found, skipping commit"
+            exit 1
+          fi
+
+          git add audio/latest.mp3 audio/chapters.json audio/transcript.txt
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase
+          git commit -m "chore: update audio"
           git push

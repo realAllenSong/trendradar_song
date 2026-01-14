@@ -10,11 +10,14 @@
 """
 
 import json
+import os
 import random
 import time
 from typing import Dict, List, Tuple, Optional, Union
 
 import requests
+
+from trendradar.utils.heartbeat import Heartbeat
 
 
 class DataFetcher:
@@ -32,6 +35,28 @@ class DataFetcher:
         "Cache-Control": "no-cache",
     }
 
+    @staticmethod
+    def _env_int(name: str, default: int) -> int:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
+    @staticmethod
+    def _env_float(name: str, default: float) -> float:
+        raw = os.environ.get(name, "").strip()
+        if not raw:
+            return default
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return default
+        return value if value > 0 else default
+
     def __init__(
         self,
         proxy_url: Optional[str] = None,
@@ -46,13 +71,25 @@ class DataFetcher:
         """
         self.proxy_url = proxy_url
         self.api_url = api_url or self.DEFAULT_API_URL
+        self._session = requests.Session()
+        self._session.headers.update(self.DEFAULT_HEADERS)
+        timeout_override = self._env_float("CRAWLER_REQUEST_TIMEOUT_SECONDS", 0)
+        connect_timeout = self._env_float("CRAWLER_CONNECT_TIMEOUT_SECONDS", 10.0)
+        read_timeout = self._env_float("CRAWLER_READ_TIMEOUT_SECONDS", 30.0)
+        if timeout_override:
+            self._timeout = (timeout_override, timeout_override)
+        else:
+            self._timeout = (connect_timeout, read_timeout)
+        self._max_retries = self._env_int("CRAWLER_MAX_RETRIES", 3)
+        self._retry_min_wait = self._env_float("CRAWLER_RETRY_MIN_SECONDS", 5.0)
+        self._retry_max_wait = self._env_float("CRAWLER_RETRY_MAX_SECONDS", 12.0)
 
     def fetch_data(
         self,
         id_info: Union[str, Tuple[str, str]],
-        max_retries: int = 2,
-        min_retry_wait: int = 3,
-        max_retry_wait: int = 5,
+        max_retries: Optional[int] = None,
+        min_retry_wait: Optional[float] = None,
+        max_retry_wait: Optional[float] = None,
     ) -> Tuple[Optional[str], str, str]:
         """
         获取指定ID数据，支持重试
@@ -78,14 +115,17 @@ class DataFetcher:
         if self.proxy_url:
             proxies = {"http": self.proxy_url, "https": self.proxy_url}
 
+        max_retries = self._max_retries if max_retries is None else max_retries
+        min_retry_wait = self._retry_min_wait if min_retry_wait is None else min_retry_wait
+        max_retry_wait = self._retry_max_wait if max_retry_wait is None else max_retry_wait
+
         retries = 0
         while retries <= max_retries:
             try:
-                response = requests.get(
+                response = self._session.get(
                     url,
                     proxies=proxies,
-                    headers=self.DEFAULT_HEADERS,
-                    timeout=10,
+                    timeout=self._timeout,
                 )
                 response.raise_for_status()
 
@@ -132,6 +172,8 @@ class DataFetcher:
         results = {}
         id_to_name = {}
         failed_ids = []
+        heartbeat = Heartbeat("crawler")
+        total = len(ids_list)
 
         for i, id_info in enumerate(ids_list):
             if isinstance(id_info, tuple):
@@ -179,6 +221,9 @@ class DataFetcher:
                 actual_interval = request_interval + random.randint(-10, 20)
                 actual_interval = max(50, actual_interval)
                 time.sleep(actual_interval / 1000)
+            heartbeat.maybe_emit(
+                f"progress {i + 1}/{total}, success={len(results)}, failed={len(failed_ids)}, last={id_value}"
+            )
 
         print(f"成功: {list(results.keys())}, 失败: {failed_ids}")
         return results, id_to_name, failed_ids

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import random
 import re
 import shutil
 import subprocess
@@ -19,8 +20,11 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from trendradar.report.helpers import clean_title
+from trendradar.utils.heartbeat import Heartbeat
 
 
 @dataclass
@@ -48,6 +52,166 @@ DEFAULT_DEDUPE_PROMPT = """
 - 只返回 JSON，不要多余文本。
 - 输出格式: {"items":[{"id":0,"text":"..."}]}
 """
+
+DEFAULT_GEMINI_RETRIES = 2
+DEFAULT_GEMINI_BACKOFF_SECONDS = 1.0
+DEFAULT_GEMINI_MAX_BACKOFF_SECONDS = 8.0
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _coerce_positive_int(value: object, default: int) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _coerce_positive_float(value: object, default: float) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        return default
+    return parsed if parsed > 0 else default
+
+
+def _resolve_gemini_retry_config(audio_cfg: Dict) -> Tuple[int, float, float]:
+    retries = audio_cfg.get("GEMINI_MAX_RETRIES")
+    backoff = audio_cfg.get("GEMINI_BACKOFF_SECONDS")
+    max_backoff = audio_cfg.get("GEMINI_MAX_BACKOFF_SECONDS")
+    retries = _env_int("AUDIO_GEMINI_MAX_RETRIES", DEFAULT_GEMINI_RETRIES) if retries is None else int(retries)
+    backoff = _env_float("AUDIO_GEMINI_BACKOFF_SECONDS", DEFAULT_GEMINI_BACKOFF_SECONDS) if backoff is None else float(backoff)
+    max_backoff = _env_float("AUDIO_GEMINI_MAX_BACKOFF_SECONDS", DEFAULT_GEMINI_MAX_BACKOFF_SECONDS) if max_backoff is None else float(max_backoff)
+    return retries, backoff, max_backoff
+
+
+def _gemini_generate_text(client, model_name: str, request_text: str, temperature: float) -> str:
+    try:
+        from google.genai import types
+    except Exception:
+        types = None
+
+    if types is not None:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=request_text,
+                config=types.GenerateContentConfig(temperature=temperature),
+            )
+        except TypeError:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=request_text,
+            )
+    else:
+        response = client.models.generate_content(
+            model=model_name,
+            contents=request_text,
+        )
+
+    return (getattr(response, "text", "") or "").strip()
+
+
+def _call_gemini_with_retries(
+    client,
+    model_name: str,
+    request_text: str,
+    temperature: float,
+    retries: int,
+    backoff: float,
+    max_backoff: float,
+    label: str,
+    heartbeat: Optional[Heartbeat] = None,
+) -> str:
+    attempt = 0
+    while True:
+        try:
+            return _gemini_generate_text(client, model_name, request_text, temperature)
+        except Exception as exc:
+            attempt += 1
+            if attempt > retries:
+                raise
+            wait = min(max_backoff, backoff * (2 ** (attempt - 1)))
+            wait += random.uniform(0, max(0.1, wait * 0.3))
+            print(f"[音频播报] Gemini {label} 失败: {exc}. {wait:.1f}s 后重试 ({attempt}/{retries})")
+            if heartbeat is not None:
+                heartbeat.maybe_emit(f"retrying gemini {label}, attempt {attempt}/{retries}")
+            time.sleep(wait)
+
+
+def _build_audio_session(audio_cfg: Dict) -> requests.Session:
+    cfg_retries = _coerce_positive_int(audio_cfg.get("FETCH_MAX_RETRIES"), 2)
+    cfg_backoff = _coerce_positive_float(audio_cfg.get("FETCH_RETRY_BACKOFF_SECONDS"), 0.5)
+    retries = _env_int("AUDIO_FETCH_MAX_RETRIES", cfg_retries)
+    backoff = _env_float("AUDIO_FETCH_RETRY_BACKOFF_SECONDS", cfg_backoff)
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "TrendRadarAudio/1.0 (+https://github.com/sansan0/TrendRadar)"
+    })
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def _build_tts_session(tts_cfg: Dict) -> requests.Session:
+    cfg_retries = _coerce_positive_int(tts_cfg.get("MAX_RETRIES"), 2)
+    cfg_backoff = _coerce_positive_float(tts_cfg.get("RETRY_BACKOFF_SECONDS"), 1.0)
+    retries = _env_int("AUDIO_TTS_MAX_RETRIES", cfg_retries)
+    backoff = _env_float("AUDIO_TTS_RETRY_BACKOFF_SECONDS", cfg_backoff)
+    retry = Retry(
+        total=retries,
+        backoff_factor=backoff,
+        status_forcelist=(429, 500, 502, 503, 504),
+        allowed_methods=frozenset(["GET", "POST"]),
+    )
+    adapter = HTTPAdapter(max_retries=retry)
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "TrendRadarAudio/1.0 (+https://github.com/sansan0/TrendRadar)"
+    })
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+def _run_subprocess_with_heartbeat(cmd: List[str], label: str, heartbeat: Heartbeat) -> subprocess.CompletedProcess:
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    while True:
+        result = process.poll()
+        if result is not None:
+            break
+        heartbeat.maybe_emit(f"{label} running")
+        time.sleep(1)
+    stdout, stderr = process.communicate()
+    return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
 
 def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResult]:
@@ -105,15 +269,15 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     if not items:
         print("[音频播报] 无可用新闻数据")
         return None
+    heartbeat = Heartbeat("audio")
+    heartbeat.force(f"start pipeline with {len(items)} items")
 
-    session = requests.Session()
-    session.headers.update({
-        "User-Agent": "TrendRadarAudio/1.0 (+https://github.com/sansan0/TrendRadar)"
-    })
+    session = _build_audio_session(audio_cfg)
 
     try:
         _enrich_items_with_content(items, session, audio_cfg)
         clusters = _cluster_items(items, audio_cfg)
+        heartbeat.force(f"clustered into {len(clusters)} groups")
         summaries = _summarize_clusters(clusters, audio_cfg, gemini_key)
         if not summaries:
             print("[音频播报] 摘要生成失败，跳过")
@@ -196,14 +360,18 @@ def _flatten_report_items(report_data: Dict) -> List[Dict]:
 
 
 def _enrich_items_with_content(items: List[Dict], session: requests.Session, audio_cfg: Dict) -> None:
-    timeout = audio_cfg.get("FETCH_TIMEOUT_SECONDS", 5)
+    timeout = _coerce_positive_float(audio_cfg.get("FETCH_TIMEOUT_SECONDS"), 15.0)
+    timeout = _env_float("AUDIO_FETCH_TIMEOUT_SECONDS", timeout)
     max_bytes = audio_cfg.get("FETCH_MAX_BYTES", 0)
-    for item in items:
+    heartbeat = Heartbeat("audio-content")
+    total = len(items)
+    for idx, item in enumerate(items, 1):
         url = item.get("url")
         if not url:
             item["content"] = ""
             continue
         item["content"] = _fetch_article_text(session, url, timeout, max_bytes)
+        heartbeat.maybe_emit(f"fetched {idx}/{total}")
 
 
 def _fetch_article_text(
@@ -213,7 +381,8 @@ def _fetch_article_text(
     max_bytes: int,
 ) -> str:
     try:
-        response = session.get(url, timeout=timeout, stream=True)
+        timeout_value = float(timeout)
+        response = session.get(url, timeout=(timeout_value, timeout_value), stream=True)
         response.raise_for_status()
         chunks = []
         total = 0
@@ -332,22 +501,39 @@ def _summarize_clusters(clusters: List[Dict], audio_cfg: Dict, api_key: str) -> 
     try:
         from google import genai
     except ImportError:
-        print("[音频播报] 未安装 google-genai，跳过")
-        return []
+        raise RuntimeError("[音频播报] 未安装 google-genai，无法生成摘要")
 
     model_name = audio_cfg.get("GEMINI_MODEL", "gemini-3-flash-preview")
     summary_prompt = (audio_cfg.get("SUMMARY_PROMPT") or "").strip() or DEFAULT_SUMMARY_PROMPT.strip()
+    retries, backoff, max_backoff = _resolve_gemini_retry_config(audio_cfg)
     client = genai.Client(api_key=api_key)
 
     summaries = []
-    for cluster in clusters:
+    heartbeat = Heartbeat("audio-gemini")
+    total = len(clusters)
+    for idx, cluster in enumerate(clusters, 1):
         items = cluster.get("items", [])
         if not items:
             continue
-        summary = _summarize_cluster(client, model_name, items, summary_prompt)
-        if summary:
-            summaries.append(summary)
+        heartbeat.maybe_emit(f"summarizing {idx}/{total}")
+        summary = _summarize_cluster(
+            client,
+            model_name,
+            items,
+            summary_prompt,
+            retries,
+            backoff,
+            max_backoff,
+            heartbeat,
+            idx,
+            total,
+        )
+        if not summary:
+            raise RuntimeError("[音频播报] Gemini 摘要为空")
+        summaries.append(summary)
 
+    if not summaries:
+        raise RuntimeError("[音频播报] 未生成任何摘要")
     return summaries
 
 
@@ -370,45 +556,30 @@ def _dedupe_transcript_segments(segments: List[Dict], audio_cfg: Dict, api_key: 
     try:
         from google import genai
     except ImportError:
-        print("[音频播报] 未安装 google-genai，跳过去重")
-        return segments
+        raise RuntimeError("[音频播报] 未安装 google-genai，无法去重")
 
     model_name = audio_cfg.get("GEMINI_MODEL", "gemini-1.5-flash")
     dedupe_prompt = (audio_cfg.get("DEDUP_PROMPT") or "").strip() or DEFAULT_DEDUPE_PROMPT.strip()
 
+    retries, backoff, max_backoff = _resolve_gemini_retry_config(audio_cfg)
     client = genai.Client(api_key=api_key)
     request_text = f"{dedupe_prompt}\n数据: {json.dumps(items, ensure_ascii=False)}"
-
-    try:
-        try:
-            from google.genai import types
-        except Exception:
-            types = None
-
-        if types is not None:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=request_text,
-                    config=types.GenerateContentConfig(temperature=0.1),
-                )
-            except TypeError:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=request_text,
-                )
-        else:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=request_text,
-            )
-        text = (getattr(response, "text", "") or "").strip()
-    except Exception:
-        return segments
+    heartbeat = Heartbeat("audio-dedupe")
+    text = _call_gemini_with_retries(
+        client,
+        model_name,
+        request_text,
+        0.1,
+        retries,
+        backoff,
+        max_backoff,
+        "dedupe",
+        heartbeat,
+    )
 
     data = _safe_json_from_text(text)
     if not data:
-        return segments
+        raise RuntimeError("[音频播报] Gemini 去重返回无效 JSON")
 
     keep_ids = None
     rewrite_map: Dict[int, str] = {}
@@ -428,7 +599,7 @@ def _dedupe_transcript_segments(segments: List[Dict], audio_cfg: Dict, api_key: 
                     continue
 
     if not keep_ids:
-        return segments
+        raise RuntimeError("[音频播报] Gemini 去重返回空结果")
 
     keep_set = set()
     for value in keep_ids:
@@ -438,7 +609,7 @@ def _dedupe_transcript_segments(segments: List[Dict], audio_cfg: Dict, api_key: 
             continue
 
     if not keep_set:
-        return segments
+        raise RuntimeError("[音频播报] Gemini 去重返回空结果")
 
     filtered = []
     for idx, segment in enumerate(segments):
@@ -457,14 +628,25 @@ def _dedupe_transcript_segments(segments: List[Dict], audio_cfg: Dict, api_key: 
             updated["text"] = updated_text
         filtered.append(updated)
     if not filtered:
-        return segments
+        raise RuntimeError("[音频播报] 去重后无可用文本")
 
     if len(filtered) != len(segments):
         print(f"[音频播报] 去重后保留 {len(filtered)}/{len(segments)} 条")
     return filtered
 
 
-def _summarize_cluster(client, model_name: str, items: List[Dict], prompt: str) -> Optional[Dict]:
+def _summarize_cluster(
+    client,
+    model_name: str,
+    items: List[Dict],
+    prompt: str,
+    retries: int,
+    backoff: float,
+    max_backoff: float,
+    heartbeat: Heartbeat,
+    index: int,
+    total: int,
+) -> Dict:
     sources = sorted({item.get("source", "") for item in items if item.get("source")})
     titles = [item.get("title", "") for item in items if item.get("title")]
     sample_title = titles[0] if titles else ""
@@ -495,44 +677,31 @@ def _summarize_cluster(client, model_name: str, items: List[Dict], prompt: str) 
         "items": snippets,
     }
 
+    request_text = f"{prompt}\n数据: {json.dumps(payload, ensure_ascii=False)}"
+    text = _call_gemini_with_retries(
+        client,
+        model_name,
+        request_text,
+        0.3,
+        retries,
+        backoff,
+        max_backoff,
+        f"summary {index}/{total}",
+        heartbeat,
+    )
+    data = _safe_json_from_text(text)
+    if not data:
+        raise RuntimeError("[音频播报] Gemini 摘要返回无效 JSON")
+    if "title" not in data:
+        data["title"] = sample_title
+    if "short_summary" not in data:
+        data["short_summary"] = data.get("summary", "")
+    data["sources"] = sources
     try:
-        request_text = f"{prompt}\n数据: {json.dumps(payload, ensure_ascii=False)}"
-        try:
-            from google.genai import types
-        except Exception:
-            types = None
-
-        if types is not None:
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=request_text,
-                    config=types.GenerateContentConfig(temperature=0.3),
-                )
-            except TypeError:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=request_text,
-                )
-        else:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=request_text,
-            )
-
-        text = (getattr(response, "text", "") or "").strip()
-        data = _safe_json_from_text(text)
-        if not data:
-            return None
-        if "title" not in data:
-            data["title"] = sample_title
-        if "short_summary" not in data:
-            data["short_summary"] = data.get("summary", "")
-        data["sources"] = sources
         data["priority_score"] = float(data.get("priority_score", 0))
-        return data
-    except Exception:
-        return None
+    except (TypeError, ValueError):
+        data["priority_score"] = 0.0
+    return data
 
 
 def _safe_json_from_text(text: str) -> Optional[Dict]:
@@ -610,7 +779,7 @@ def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict)
         return _synthesize_segments_voxcpm_onnx(segments, segment_dir, tts_cfg)
 
     if _is_hf_space_endpoint(endpoint, provider):
-        audio_segments, durations = _synthesize_segments_hf_space(segments, segment_dir, endpoint)
+        audio_segments, durations = _synthesize_segments_hf_space(segments, segment_dir, endpoint, tts_cfg)
         if audio_segments:
             return audio_segments, durations
         return _synthesize_segments_gradio(segments, segment_dir, endpoint)
@@ -630,27 +799,42 @@ def _synthesize_segments_http(
     api_key = tts_cfg.get("API_KEY", "")
     voice = tts_cfg.get("VOICE", "default")
     output_format = tts_cfg.get("FORMAT", "mp3")
+    heartbeat = Heartbeat("tts-http")
+    total = len(segments)
+    timeout_value = _coerce_positive_float(tts_cfg.get("TIMEOUT_SECONDS"), 90.0)
+    timeout_value = _env_float("AUDIO_TTS_TIMEOUT_SECONDS", timeout_value)
 
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    for idx, segment in enumerate(segments):
-        text = segment.get("text", "")
-        if not text:
-            continue
-        payload = {"text": text, "voice": voice, "format": output_format}
-        try:
-            response = requests.post(endpoint, headers=headers, json=payload, timeout=60)
-            response.raise_for_status()
-            audio_data = response.content
-            segment_path = segment_dir / f"segment_{idx:03d}.{output_format}"
-            with open(segment_path, "wb") as handle:
-                handle.write(audio_data)
-            audio_segments.append(segment_path)
-            durations.append(_probe_duration(segment_path))
-        except Exception:
-            continue
+    session = _build_tts_session(tts_cfg)
+    try:
+        for idx, segment in enumerate(segments):
+            text = segment.get("text", "")
+            if not text:
+                heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
+                continue
+            payload = {"text": text, "voice": voice, "format": output_format}
+            try:
+                response = session.post(
+                    endpoint,
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout_value,
+                )
+                response.raise_for_status()
+                audio_data = response.content
+                segment_path = segment_dir / f"segment_{idx:03d}.{output_format}"
+                with open(segment_path, "wb") as handle:
+                    handle.write(audio_data)
+                audio_segments.append(segment_path)
+                durations.append(_probe_duration(segment_path))
+            except Exception as exc:
+                print(f"[音频播报] TTS 请求失败: {exc}")
+            heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
+    finally:
+        session.close()
 
     return audio_segments, durations
 
@@ -661,6 +845,7 @@ def _synthesize_segments_voxcpm_onnx(
     tts_cfg: Dict,
 ) -> Tuple[List[Path], List[float]]:
     voxcpm_cfg = tts_cfg.get("VOXCPM", {})
+    heartbeat = Heartbeat("tts-voxcpm")
 
     repo_dir_raw = (voxcpm_cfg.get("REPO_DIR") or "").strip()
     infer_path_raw = (voxcpm_cfg.get("INFER_PATH") or "").strip()
@@ -762,10 +947,11 @@ def _synthesize_segments_voxcpm_onnx(
             encoding="utf-8",
         )
 
-        result = subprocess.run(
+        heartbeat.force(f"voxcpm batch {len(texts)} segments")
+        result = _run_subprocess_with_heartbeat(
             [sys.executable, str(infer_path), "--config", str(config_path)],
-            capture_output=True,
-            text=True,
+            "voxcpm batch",
+            heartbeat,
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()
@@ -778,10 +964,12 @@ def _synthesize_segments_voxcpm_onnx(
 
     audio_segments: List[Path] = []
     durations: List[float] = []
+    total = len(segments)
 
     for idx, segment in enumerate(segments):
         text = segment.get("text", "").strip()
         if not text:
+            heartbeat.maybe_emit(f"segment {idx + 1}/{total}")
             continue
         segment_path = segment_dir / f"segment_{idx:03d}.wav"
         config_path = segment_dir / f"voxcpm_config_{idx:03d}.json"
@@ -793,10 +981,10 @@ def _synthesize_segments_voxcpm_onnx(
             encoding="utf-8",
         )
 
-        result = subprocess.run(
+        result = _run_subprocess_with_heartbeat(
             [sys.executable, str(infer_path), "--config", str(config_path)],
-            capture_output=True,
-            text=True,
+            f"voxcpm segment {idx + 1}/{total}",
+            heartbeat,
         )
         if result.returncode != 0:
             stderr = result.stderr.strip()
@@ -807,6 +995,7 @@ def _synthesize_segments_voxcpm_onnx(
 
         audio_segments.append(segment_path)
         durations.append(_probe_duration(segment_path))
+        heartbeat.maybe_emit(f"segment {idx + 1}/{total}")
 
     return audio_segments, durations
 
@@ -827,9 +1016,12 @@ def _synthesize_segments_gradio(
 
     audio_segments = []
     durations = []
+    heartbeat = Heartbeat("tts-gradio")
+    total = len(segments)
     for idx, segment in enumerate(segments):
         text = segment.get("text", "")
         if not text:
+            heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
             continue
         try:
             result = client.predict(*_default_space_args(text), api_name="/gen_single")
@@ -838,8 +1030,9 @@ def _synthesize_segments_gradio(
                 continue
             audio_segments.append(segment_path)
             durations.append(_probe_duration(segment_path))
-        except Exception:
-            continue
+        except Exception as exc:
+            print(f"[音频播报] Gradio TTS 失败: {exc}")
+        heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
 
     return audio_segments, durations
 
@@ -896,17 +1089,22 @@ def _synthesize_segments_sherpa_onnx(
 
     audio_segments = []
     durations = []
+    heartbeat = Heartbeat("tts-sherpa")
+    total = len(segments)
     for idx, segment in enumerate(segments):
         text = segment.get("text", "").strip()
         if not text:
+            heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
             continue
         audio = tts.generate(text, sid=sid, speed=speed)
         if not getattr(audio, "samples", None):
+            heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
             continue
         segment_path = segment_dir / f"segment_{idx:03d}.wav"
         if _write_wave(segment_path, audio.samples, audio.sample_rate):
             audio_segments.append(segment_path)
             durations.append(len(audio.samples) / audio.sample_rate)
+        heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
 
     return audio_segments, durations
 
@@ -942,10 +1140,13 @@ def _synthesize_segments_kokoro(
 
     audio_segments = []
     durations = []
+    heartbeat = Heartbeat("tts-kokoro")
+    total = len(segments)
 
     for idx, segment in enumerate(segments):
         text = segment.get("text", "").strip()
         if not text:
+            heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
             continue
         try:
             generator = pipeline(text, voice=voice, speed=speed, split_pattern=split_pattern)
@@ -969,8 +1170,9 @@ def _synthesize_segments_kokoro(
             if _write_audio_samples(segment_path, samples, sample_rate):
                 audio_segments.append(segment_path)
                 durations.append(len(samples) / sample_rate)
-        except Exception:
-            continue
+        except Exception as exc:
+            print(f"[音频播报] Kokoro TTS 失败: {exc}")
+        heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
 
     return audio_segments, durations
 
@@ -979,6 +1181,7 @@ def _synthesize_segments_hf_space(
     segments: List[Dict],
     segment_dir: Path,
     endpoint: str,
+    tts_cfg: Dict,
 ) -> Tuple[List[Path], List[float]]:
     base_url = _hf_space_base_url(endpoint)
     if not base_url:
@@ -986,34 +1189,55 @@ def _synthesize_segments_hf_space(
 
     audio_segments = []
     durations = []
+    heartbeat = Heartbeat("tts-hf-space")
+    total = len(segments)
+    timeout_value = _coerce_positive_float(tts_cfg.get("TIMEOUT_SECONDS"), 90.0)
+    timeout_value = _env_float("AUDIO_TTS_TIMEOUT_SECONDS", timeout_value)
+    event_timeout = _coerce_positive_float(tts_cfg.get("EVENT_TIMEOUT_SECONDS"), 180.0)
+    event_timeout = _env_float("AUDIO_TTS_EVENT_TIMEOUT_SECONDS", event_timeout)
 
-    for idx, segment in enumerate(segments):
-        text = segment.get("text", "")
-        if not text:
-            continue
-        try:
-            payload = {"data": _default_space_args(text)}
-            response = requests.post(
-                f"{base_url}/gradio_api/call/gen_single",
-                json=payload,
-                timeout=60,
-            )
-            response.raise_for_status()
-            event_id = response.json().get("event_id")
-            if not event_id:
+    session = _build_tts_session(tts_cfg)
+    try:
+        for idx, segment in enumerate(segments):
+            text = segment.get("text", "")
+            if not text:
+                heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
                 continue
+            try:
+                payload = {"data": _default_space_args(text)}
+                response = session.post(
+                    f"{base_url}/gradio_api/call/gen_single",
+                    json=payload,
+                    timeout=timeout_value,
+                )
+                response.raise_for_status()
+                event_id = response.json().get("event_id")
+                if not event_id:
+                    heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
+                    continue
 
-            result = _read_hf_space_event(base_url, "gen_single", event_id)
-            if not result:
-                continue
+                result = _read_hf_space_event(
+                    base_url,
+                    "gen_single",
+                    event_id,
+                    heartbeat=heartbeat,
+                    timeout_seconds=event_timeout,
+                )
+                if not result:
+                    heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
+                    continue
 
-            segment_path = _materialize_gradio_audio(result, segment_dir, idx)
-            if not segment_path:
-                continue
-            audio_segments.append(segment_path)
-            durations.append(_probe_duration(segment_path))
-        except Exception:
-            continue
+                segment_path = _materialize_gradio_audio(result, segment_dir, idx)
+                if not segment_path:
+                    heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
+                    continue
+                audio_segments.append(segment_path)
+                durations.append(_probe_duration(segment_path))
+            except Exception as exc:
+                print(f"[音频播报] HF Space TTS 失败: {exc}")
+            heartbeat.maybe_emit(f"segments {idx + 1}/{total}")
+    finally:
+        session.close()
 
     return audio_segments, durations
 
@@ -1052,18 +1276,26 @@ def _hf_space_base_url(endpoint: str) -> Optional[str]:
     return f"https://{slug}.hf.space"
 
 
-def _read_hf_space_event(base_url: str, api_name: str, event_id: str) -> Optional[object]:
+def _read_hf_space_event(
+    base_url: str,
+    api_name: str,
+    event_id: str,
+    heartbeat: Optional[Heartbeat] = None,
+    timeout_seconds: float = 180.0,
+) -> Optional[object]:
     try:
         response = requests.get(
             f"{base_url}/gradio_api/call/{api_name}/{event_id}",
             headers={"Accept": "text/event-stream"},
             stream=True,
-            timeout=180,
+            timeout=timeout_seconds,
         )
         response.raise_for_status()
         current_event = None
         for raw in response.iter_lines(decode_unicode=True):
             if not raw:
+                if heartbeat is not None:
+                    heartbeat.maybe_emit(f"waiting for {api_name} event")
                 continue
             if raw.startswith("event:"):
                 current_event = raw.split(":", 1)[1].strip()
@@ -1297,10 +1529,18 @@ def _concat_audio(segment_paths: List[Path], output_path: Path) -> bool:
 
     cmd.append(str(output_path))
 
+    heartbeat = Heartbeat("audio-concat")
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        result = _run_subprocess_with_heartbeat(cmd, "ffmpeg concat", heartbeat)
+        if result.returncode != 0:
+            stderr = (result.stderr or "").strip()
+            stdout = (result.stdout or "").strip()
+            detail = stderr or stdout or "unknown error"
+            print(f"[音频播报] 音频合成失败: {detail}")
+            return False
         return True
-    except Exception:
+    except Exception as exc:
+        print(f"[音频播报] 音频合成失败: {exc}")
         return False
 
 
