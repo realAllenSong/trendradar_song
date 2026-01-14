@@ -222,7 +222,15 @@ def _load_audio_config(config_data: Dict) -> Dict:
     output = audio.get("output", {})
 
     enabled_env = _get_env_bool("AUDIO_ENABLED")
-    interval_env = _get_env_int("AUDIO_INTERVAL_HOURS")
+    interval_env_raw = os.environ.get("AUDIO_INTERVAL_HOURS", "").strip()
+    interval_env: Optional[int]
+    if interval_env_raw == "":
+        interval_env = None
+    else:
+        try:
+            interval_env = int(interval_env_raw)
+        except ValueError:
+            interval_env = None
     fetch_timeout_env = _get_env_int("AUDIO_FETCH_TIMEOUT_SECONDS")
     fetch_max_bytes_env = _get_env_int("AUDIO_FETCH_MAX_BYTES")
     embedding_model_env = _get_env_str("AUDIO_EMBEDDING_MODEL")
@@ -259,7 +267,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
 
     return {
         "ENABLED": enabled_env if enabled_env is not None else audio.get("enabled", False),
-        "INTERVAL_HOURS": interval_env or audio.get("interval_hours", 12),
+        "INTERVAL_HOURS": audio.get("interval_hours", 12) if interval_env is None else interval_env,
         "FETCH_TIMEOUT_SECONDS": fetch_timeout_env or audio.get("fetch_timeout_seconds", 5),
         "FETCH_MAX_BYTES": fetch_max_bytes_env or audio.get("fetch_max_bytes", 0),
         "EMBEDDING_MODEL": embedding_model_env or audio.get("embedding_model", "intfloat/multilingual-e5-small"),
