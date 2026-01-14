@@ -942,6 +942,8 @@ def _synthesize_segments_voxcpm_onnx(
             return [], []
 
         batch_size = voxcpm_cfg.get("BATCH_SIZE", 5)
+        if batch_size <= 0:
+            batch_size = 5  # Fallback to default if invalid
         total_texts = len(texts)
         all_outputs: List[Path] = []
 

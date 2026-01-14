@@ -308,7 +308,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
                 "FIXED_TIMESTEPS": voxcpm_fixed_env or voxcpm.get("fixed_timesteps", 10),
                 "SEED": voxcpm_seed_env or voxcpm.get("seed", 1),
                 "BATCH_MODE": voxcpm_batch_env if voxcpm_batch_env is not None else voxcpm.get("batch_mode", True),
-                "BATCH_SIZE": voxcpm_batch_size_env if voxcpm_batch_size_env is not None else voxcpm.get("batch_size", 5),
+                "BATCH_SIZE": voxcpm_batch_size_env or voxcpm.get("batch_size", 5),
             },
             "KOKORO": {
                 "LANG_CODE": _get_env_str("KOKORO_LANG_CODE") or kokoro.get("lang_code", "z"),
