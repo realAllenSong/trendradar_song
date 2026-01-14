@@ -941,9 +941,9 @@ def _synthesize_segments_voxcpm_onnx(
         if not texts:
             return [], []
 
-        batch_size = voxcpm_cfg.get("BATCH_SIZE", 5)
+        batch_size = voxcpm_cfg.get("BATCH_SIZE", 10)
         if batch_size <= 0:
-            batch_size = 5  # Fallback to default if invalid
+            batch_size = 10  # Fallback to default if invalid
         total_texts = len(texts)
         all_outputs: List[Path] = []
 

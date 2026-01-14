@@ -175,7 +175,7 @@ audio:
       voices_file: "models/ONNX_Lab/voices.json"
       voice: "context_zh_a_share_market_news"
       batch_mode: true
-      batch_size: 5  # Process 5 segments per chunk (conservative for GitHub Actions 2-core runner)
+      batch_size: 10  # Process 10 segments per chunk
       max_threads: 2
       text_normalizer: true
       audio_normalizer: false

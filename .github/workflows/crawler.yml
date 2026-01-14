@@ -198,7 +198,7 @@ jobs:
   audio:
     runs-on: ubuntu-latest
     needs: [assets, crawl]
-    timeout-minutes: 60
+    timeout-minutes: 120  # Extended timeout to handle slow runners
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
