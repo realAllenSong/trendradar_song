@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -58,12 +59,40 @@ def _has_tokenizer(voxcpm_dir: Path) -> bool:
     return any((voxcpm_dir / name).is_file() for name in TOKENIZER_FILES)
 
 
+def _merge_repo_contents(source_dir: Path, repo_dir: Path) -> None:
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    for item in source_dir.iterdir():
+        if item.name in {".git", "models"}:
+            continue
+        destination = repo_dir / item.name
+        if item.is_dir():
+            shutil.copytree(item, destination, dirs_exist_ok=True)
+        else:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(item, destination)
+
+
 def _safe_clone(repo_url: str, repo_dir: Path) -> bool:
     if (repo_dir / "infer.py").is_file():
         return True
     if not repo_url:
         return False
     repo_dir.parent.mkdir(parents=True, exist_ok=True)
+
+    if repo_dir.exists() and any(repo_dir.iterdir()):
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                tmp_repo = Path(tmp_dir) / "repo"
+                subprocess.run(
+                    ["git", "clone", "--depth", "1", repo_url, str(tmp_repo)],
+                    check=True,
+                )
+                _merge_repo_contents(tmp_repo, repo_dir)
+            return (repo_dir / "infer.py").is_file()
+        except Exception as exc:
+            print(f"[VoxCPM] Clone failed: {exc}")
+            return False
+
     try:
         subprocess.run(
             ["git", "clone", "--depth", "1", repo_url, str(repo_dir)],
