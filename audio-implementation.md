@@ -7,14 +7,14 @@ Implemented the audio summary pipeline and UI integration described in `SPEC-aud
 - Added audio pipeline (`trendradar/audio/pipeline.py`) with:
   - Title dedup + event clustering (fuzzy + local embeddings).
   - Gemini-based summarization with priority scoring.
-- Kokoro TTS (CPU) support with configurable voice, plus Sherpa-ONNX Matcha (16k vocoder) and IndexTTS (HTTP, HF Space `/gradio_api/call`, with gradio_client fallback), ffmpeg concatenation, and chapters JSON output.
+- VoxCPM 1.5B ONNX CLI TTS with preset voice support, plus Sherpa-ONNX Matcha (16k vocoder) and IndexTTS (HTTP, HF Space `/gradio_api/call`, with gradio_client fallback), ffmpeg concatenation, and chapters JSON output.
   - 12h interval gating by audio file mtime.
   - Writes audio/chapters to both `output/audio` and repo-root `audio`.
 - Integrated audio generation into `_run_analysis_pipeline` in `trendradar/__main__.py`.
 - Added bottom audio player + chapter list to `trendradar/report/html.py`.
 - Added audio config block to `config/config.yaml`, including transcript dedupe settings, and loader support in `trendradar/core/loader.py`.
 - Updated workflow commit step to include audio artifacts.
-- Added dependencies: `rapidfuzz`, `google-genai`, `sherpa-onnx`, `kokoro`, `misaki[zh]`, `soundfile`, `numpy`.
+- Added dependencies: `rapidfuzz`, `google-genai`, `sherpa-onnx`, `soundfile`, `numpy`, `onnxruntime`, `transformers`, `tokenizers`, `wetext`, `regex`, `inflect`.
 - Docker entrypoint now auto-downloads Sherpa-ONNX model when provider is enabled.
 
 ## Paths Updated

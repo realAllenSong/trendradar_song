@@ -71,7 +71,7 @@ audio:
 ## Output Files
 - `output/audio/latest.mp3` (final audio)
 - `output/audio/chapters.json` (chapters)
-- `output/audio/transcript.txt` (plain text script)
+- `audio/transcript.txt` (plain text script)
 
 If `ffmpeg` is missing, `latest.mp3` will NOT be generated.
 
@@ -89,6 +89,45 @@ sudo apt-get install -y ffmpeg
 ```
 - Add `GEMINI_API_KEY` to repository secrets.
 - Cache `models/sherpa-onnx` to avoid re-downloading each run.
+
+## VoxCPM 1.5B ONNX CLI (CPU)
+
+This option uses the ONNX_Lab CLI (`infer.py`) directly and avoids API calls.
+
+### Requirements
+- Python deps: `onnxruntime`, `transformers`, `tokenizers`, `wetext`, `regex`, `inflect`, `soundfile`
+- ONNX_Lab repo with models and voices available on disk
+
+### Minimum Config (YAML)
+```
+audio:
+  enabled: true
+  gemini_api_key: "YOUR_KEY"
+
+  tts:
+    provider: "voxcpm_onnx"
+    voxcpm:
+      repo_dir: "models/ONNX_Lab"
+      models_dir: "models/ONNX_Lab/models/onnx_models_quantized"
+      voxcpm_dir: "models/ONNX_Lab/models/VoxCPM1.5"
+      voices_file: "models/ONNX_Lab/voices.json"
+      voice: "context_zh_a_share_market_news"
+      batch_mode: true
+      max_threads: 2
+      text_normalizer: true
+      audio_normalizer: false
+      cfg_value: 2.5
+      fixed_timesteps: 10
+      seed: 1
+```
+
+### Environment Overrides (optional)
+- `VOXCPM_REPO_DIR`, `VOXCPM_INFER_PATH`
+- `VOXCPM_MODELS_DIR`, `VOXCPM_VOXCPM_DIR`, `VOXCPM_VOICES_FILE`
+- `VOXCPM_VOICE`, `VOXCPM_MAX_THREADS`
+- `VOXCPM_BATCH_MODE`
+- `VOXCPM_TEXT_NORMALIZER`, `VOXCPM_AUDIO_NORMALIZER`
+- `VOXCPM_CFG_VALUE`, `VOXCPM_FIXED_TIMESTEPS`, `VOXCPM_SEED`
 
 ## Lightweight Usage in Another Project
 If you only need TTS (no summarization), you can directly create a `sherpa_onnx.OfflineTts`:
@@ -114,4 +153,3 @@ tts = sherpa_onnx.OfflineTts(
 )
 audio = tts.generate("Your text here", sid=0, speed=1.0)
 ```
-

@@ -47,8 +47,6 @@
 cd docker
 docker compose down
 docker compose -f docker-compose-build.yml up -d --build trendradar
-
-然后立刻生成一次报告（不想等 cron）：
 docker exec -it trendradar python manage.py run
 
 http://localhost:8080/?ts=1

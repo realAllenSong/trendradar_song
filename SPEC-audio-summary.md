@@ -159,7 +159,7 @@ Proposed config keys (in `config.yaml` or `.env`):
 ## Dependencies
 - Python: `requests`, `sentence-transformers`, `rapidfuzz`, `numpy`
 - Gemini: `google-genai`
-- TTS (CPU): `kokoro`, `misaki[zh]`, `soundfile`
+- TTS (CPU): VoxCPM 1.5B ONNX CLI (`onnxruntime`, `transformers`, `tokenizers`, `wetext`, `regex`, `inflect`, `soundfile`)
 - Audio: `ffmpeg` (for concatenation) or `pydub` (requires ffmpeg)
 
 ## Failure Handling

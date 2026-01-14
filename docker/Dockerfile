@@ -8,7 +8,14 @@ ENV SUPERCRONIC_VERSION=v0.2.39
 
 RUN set -ex && \
     apt-get update && \
-    apt-get install -y --no-install-recommends curl ca-certificates ffmpeg espeak-ng libsndfile1 && \
+    apt-get install -y --no-install-recommends \
+    build-essential \
+    git \
+    curl \
+    ca-certificates \
+    ffmpeg \
+    espeak-ng \
+    libsndfile1 && \
     case ${TARGETARCH} in \
     amd64) \
     export SUPERCRONIC_URL=https://github.com/aptible/supercronic/releases/download/${SUPERCRONIC_VERSION}/supercronic-linux-amd64; \
@@ -57,6 +64,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY docker/manage.py .
 COPY trendradar/ ./trendradar/
 COPY tools/download_sherpa_onnx_model.py ./tools/download_sherpa_onnx_model.py
+COPY tools/ensure_voxcpm_assets.py ./tools/ensure_voxcpm_assets.py
 
 # 复制 entrypoint.sh 并强制转换为 LF 格式
 COPY docker/entrypoint.sh /entrypoint.sh.tmp

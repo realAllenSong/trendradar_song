@@ -218,6 +218,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
     tts = audio.get("tts", {})
     kokoro = tts.get("kokoro", {})
     sherpa_onnx = tts.get("sherpa_onnx", {})
+    voxcpm = tts.get("voxcpm", {})
     output = audio.get("output", {})
 
     enabled_env = _get_env_bool("AUDIO_ENABLED")
@@ -236,6 +237,19 @@ def _load_audio_config(config_data: Dict) -> Dict:
     sherpa_max_sent_env = os.environ.get("SHERPA_ONNX_MAX_NUM_SENTENCES", "").strip()
     kokoro_speed_env = os.environ.get("KOKORO_SPEED", "").strip()
     kokoro_sample_rate_env = _get_env_int("KOKORO_SAMPLE_RATE")
+    voxcpm_repo_env = _get_env_str("VOXCPM_REPO_DIR")
+    voxcpm_infer_env = _get_env_str("VOXCPM_INFER_PATH")
+    voxcpm_models_env = _get_env_str("VOXCPM_MODELS_DIR")
+    voxcpm_voxcpm_env = _get_env_str("VOXCPM_VOXCPM_DIR")
+    voxcpm_voices_env = _get_env_str("VOXCPM_VOICES_FILE")
+    voxcpm_voice_env = _get_env_str("VOXCPM_VOICE")
+    voxcpm_max_threads_env = _get_env_int("VOXCPM_MAX_THREADS")
+    voxcpm_text_norm_env = _get_env_bool("VOXCPM_TEXT_NORMALIZER")
+    voxcpm_audio_norm_env = _get_env_bool("VOXCPM_AUDIO_NORMALIZER")
+    voxcpm_cfg_env = os.environ.get("VOXCPM_CFG_VALUE", "").strip()
+    voxcpm_fixed_env = _get_env_int("VOXCPM_FIXED_TIMESTEPS")
+    voxcpm_seed_env = _get_env_int("VOXCPM_SEED")
+    voxcpm_batch_env = _get_env_bool("VOXCPM_BATCH_MODE")
 
     def _parse_float(value: str, default: float) -> float:
         try:
@@ -262,6 +276,21 @@ def _load_audio_config(config_data: Dict) -> Dict:
             "API_KEY": _get_env_str("INDEXTTS_API_KEY") or tts.get("api_key", ""),
             "VOICE": _get_env_str("INDEXTTS_VOICE") or tts.get("voice", "default"),
             "FORMAT": _get_env_str("INDEXTTS_FORMAT") or tts.get("format", "mp3"),
+            "VOXCPM": {
+                "REPO_DIR": voxcpm_repo_env or voxcpm.get("repo_dir", ""),
+                "INFER_PATH": voxcpm_infer_env or voxcpm.get("infer_path", ""),
+                "MODELS_DIR": voxcpm_models_env or voxcpm.get("models_dir", ""),
+                "VOXCPM_DIR": voxcpm_voxcpm_env or voxcpm.get("voxcpm_dir", ""),
+                "VOICES_FILE": voxcpm_voices_env or voxcpm.get("voices_file", ""),
+                "VOICE": voxcpm_voice_env or voxcpm.get("voice", ""),
+                "MAX_THREADS": voxcpm_max_threads_env if voxcpm_max_threads_env is not None else voxcpm.get("max_threads", 0),
+                "TEXT_NORMALIZER": voxcpm_text_norm_env if voxcpm_text_norm_env is not None else voxcpm.get("text_normalizer", True),
+                "AUDIO_NORMALIZER": voxcpm_audio_norm_env if voxcpm_audio_norm_env is not None else voxcpm.get("audio_normalizer", False),
+                "CFG_VALUE": _parse_float(voxcpm_cfg_env, voxcpm.get("cfg_value", 2.5)),
+                "FIXED_TIMESTEPS": voxcpm_fixed_env or voxcpm.get("fixed_timesteps", 10),
+                "SEED": voxcpm_seed_env or voxcpm.get("seed", 1),
+                "BATCH_MODE": voxcpm_batch_env if voxcpm_batch_env is not None else voxcpm.get("batch_mode", True),
+            },
             "KOKORO": {
                 "LANG_CODE": _get_env_str("KOKORO_LANG_CODE") or kokoro.get("lang_code", "z"),
                 "VOICE": _get_env_str("KOKORO_VOICE") or kokoro.get("voice", "zm_yunyang"),

@@ -33,6 +33,24 @@ jobs:
           fetch-depth: 1
           clean: true
 
+      - name: Cache VoxCPM models
+        if: success()
+        uses: actions/cache@v4
+        with:
+          path: models/ONNX_Lab/models
+          key: voxcpm-models-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py') }}
+          restore-keys: |
+            voxcpm-models-${{ runner.os }}-
+
+      - name: Cache Hugging Face assets
+        if: success()
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-cache-${{ runner.os }}-${{ hashFiles('tools/ensure_voxcpm_assets.py', 'requirements.txt') }}
+          restore-keys: |
+            hf-cache-${{ runner.os }}-
+
 
       # --------------------------------------------------------------------------------
       # 🚦 TRAFFIC CONTROL / 流量控制
@@ -70,6 +88,25 @@ jobs:
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch==2.2.2
           pip install -r requirements.txt
+
+      - name: Prepare VoxCPM ONNX repo
+        if: success()
+        run: |
+          if [ ! -d models/ONNX_Lab ]; then
+            git clone --depth 1 https://github.com/realAllenSong/ONNX_Lab models/ONNX_Lab
+          fi
+
+          if [ ! -d models/ONNX_Lab/models/onnx_models_quantized ]; then
+            echo "VoxCPM ONNX models missing. Populate models/ONNX_Lab/models/onnx_models_quantized and models/ONNX_Lab/models/VoxCPM1.5."
+          fi
+
+      - name: Ensure VoxCPM assets
+        if: success()
+        env:
+          VOXCPM_ONNX_REPO: Oulasong/voxcpm-onnx
+          VOXCPM_MODEL_REPO: openbmb/VoxCPM1.5
+        run: |
+          python tools/ensure_voxcpm_assets.py
 
       - name: Verify required files
         if: success()

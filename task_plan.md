@@ -1,27 +1,29 @@
-# Task Plan: Audio News Summary Implementation
+# Task Plan: Switch TTS to VoxCPM 1.5B ONNX CLI
 
 ## Goal
-Implement the audio summary pipeline (clustering, summarization, TTS, and player integration) described in `SPEC-audio-summary.md`.
+Replace Kokoro TTS with VoxCPM 1.5B ONNX CLI synthesis and update configs/workflows so audio generation uses the new model reliably.
 
 ## Phases
 - [x] Phase 1: Plan and setup
 - [x] Phase 2: Research/gather information
 - [x] Phase 3: Execute/build
 - [x] Phase 4: Review and deliver
+- [x] Phase 5: Fix Docker VoxCPM asset download + runtime validation
 
 ## Key Questions
-1. Where should the audio pipeline integrate in the current TrendRadar run flow?
-2. What minimal config + defaults are needed to run in GitHub Actions without breaking existing flows?
-3. How should the player + chapters be injected into the HTML output?
+1. What CLI/config inputs are required by ONNX_Lab for preset voice synthesis?
+2. Which repo paths/config keys should TrendRadar expose for VoxCPM CLI?
+3. What dependency/workflow updates ensure CLI inference runs in CI?
 
 ## Decisions Made
-- Audio generation runs inside `_run_analysis_pipeline` after stats computation.
-- Player loads `audio/latest.mp3` and `audio/chapters.json` via client-side fetch, hides if missing.
-- Audio artifacts are written to both `output/audio` and repo-root `audio` for Pages + local preview.
-- IndexTTS Space is called via `gradio_client` when endpoint is HF Space (auto-detect or provider flag).
+- Use ONNX_Lab CLI `infer.py --config` for per-segment synthesis with preset voice.
+- Expose VoxCPM paths/voice config under `audio.tts.voxcpm` and env overrides.
 
 ## Errors Encountered
-- None yet.
+- Docker build failed compiling `pyahocorasick` due to missing `gcc` on arm64 -> add `build-essential` to Dockerfile.
+- VoxCPM CLI failed: missing ONNX files in `models/ONNX_Lab/models/onnx_models_quantized` inside container.
+- ONNX files landed in nested `onnx_models_quantized/onnx_models_quantized` due to HF repo layout + `.cache`.
+- Manual runs skipped audio without logs because interval gating only checked `audio/latest.mp3` and didn't consider missing transcript/chapters.
 
 ## Status
-**Completed** - Space API support added and documented.
+**Completed** - Added ONNX layout normalization and mounted `/app/audio` for Docker outputs; awaiting validation run.

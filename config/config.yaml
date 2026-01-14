@@ -150,8 +150,7 @@ audio:
     你是文本去重助手，请对输入的新闻播报文本列表去重，只删除重复或明显近似的条目。
     要求：
     - 保持原始顺序。
-    - 将所有英文单词翻译为中文(或相同的笼统意思,比如A股换成国内股市)，无法翻译时用中文概括替代。
-    - 输出文本只能包含中文和数字（可包含中文标点）。
+    - 输出文本应为可朗读内容，避免无意义符号。
     - 只输出 JSON，不要多余文本。
     - 输出格式: {"items":[{"id":0,"text":"..."}]}
   summary_prompt: |
@@ -164,17 +163,24 @@ audio:
     只输出 JSON，不要多余文本。
 
   tts:
-    provider: "kokoro"               # 可选: kokoro | sherpa_onnx | hf_space | http
+    provider: "voxcpm_onnx"          # 可选: voxcpm_onnx | sherpa_onnx | hf_space | http
     endpoint: ""                      # IndexTTS 服务地址
     api_key: ""                       # 可选
     voice: "default"
     format: "mp3"
-    kokoro:
-      lang_code: "z"
-      voice: "zm_yunyang"
-      speed: 1.0
-      split_pattern: "\\n+"
-      sample_rate: 24000
+    voxcpm:
+      repo_dir: "models/ONNX_Lab"
+      models_dir: "models/ONNX_Lab/models/onnx_models_quantized"
+      voxcpm_dir: "models/ONNX_Lab/models/VoxCPM1.5"
+      voices_file: "models/ONNX_Lab/voices.json"
+      voice: "context_zh_a_share_market_news"
+      batch_mode: true
+      max_threads: 2
+      text_normalizer: true
+      audio_normalizer: false
+      cfg_value: 2.5
+      fixed_timesteps: 10
+      seed: 1
     sherpa_onnx:
       model_dir: "models/sherpa-onnx/matcha-icefall-zh-en"
       acoustic_model: "model-steps-3.onnx"

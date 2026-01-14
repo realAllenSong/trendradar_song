@@ -11,6 +11,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -43,8 +44,7 @@ DEFAULT_DEDUPE_PROMPT = """
 你是文本去重助手，请对输入的新闻播报文本列表去重，只删除重复或明显近似的条目。
 要求：
 - 保持原始顺序。
-- 将所有英文单词翻译为中文(或相同的笼统意思,比如A股换成国内股市)，无法翻译时用中文概括替代。
-- 输出文本只能包含中文和数字（可包含中文标点）。
+- 输出文本应为可朗读内容，避免无意义符号。
 - 只返回 JSON，不要多余文本。
 - 输出格式: {"items":[{"id":0,"text":"..."}]}
 """
@@ -69,16 +69,30 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
     public_audio_path = public_dir / filename
     output_chapters_path = output_dir / chapters_filename
     public_chapters_path = public_dir / chapters_filename
+    output_transcript_path = output_dir / transcript_filename
     transcript_path = public_dir / transcript_filename
 
-    if not _should_generate_audio(public_audio_path, audio_cfg.get("INTERVAL_HOURS", 12)):
+    interval_hours = audio_cfg.get("INTERVAL_HOURS", 12)
+    force_generate = (
+        not public_audio_path.exists()
+        or not public_chapters_path.exists()
+        or not transcript_path.exists()
+    )
+    if not force_generate and not _should_generate_audio(public_audio_path, interval_hours):
+        try:
+            last_time = datetime.fromtimestamp(public_audio_path.stat().st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            last_time = "unknown"
+        print(
+            f"[音频播报] 跳过生成：间隔未到({interval_hours}h)，最近音频 {last_time}"
+        )
         return AudioResult(str(public_audio_path), str(public_chapters_path), generated=False)
 
     gemini_key = audio_cfg.get("GEMINI_API_KEY", "").strip()
     tts_cfg = audio_cfg.get("TTS", {})
     tts_endpoint = tts_cfg.get("ENDPOINT", "").strip()
     provider = (tts_cfg.get("PROVIDER") or "").strip().lower()
-    use_local_tts = provider in {"sherpa_onnx", "sherpa", "kokoro"}
+    use_local_tts = provider in {"sherpa_onnx", "sherpa", "kokoro", "voxcpm_onnx"}
 
     if not gemini_key:
         print("[音频播报] 未配置 GEMINI_API_KEY，跳过音频生成")
@@ -111,9 +125,11 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
             return None
 
         _write_transcript(segments, transcript_path)
+        _write_transcript(segments, output_transcript_path)
 
         segments = _dedupe_transcript_segments(segments, audio_cfg, gemini_key)
         _write_transcript(segments, transcript_path)
+        _write_transcript(segments, output_transcript_path)
 
         segment_dir = output_dir / "segments"
         segment_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +166,8 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
 
 
 def _should_generate_audio(audio_path: Path, interval_hours: int) -> bool:
+    if interval_hours <= 0:
+        return True
     if not audio_path.exists():
         return True
     last_time = audio_path.stat().st_mtime
@@ -528,8 +546,7 @@ def _safe_json_from_text(text: str) -> Optional[Dict]:
 
 
 def _sanitize_chinese_text(text: str) -> str:
-    cleaned = re.sub(r"[A-Za-z]+", "", text)
-    cleaned = re.sub(r"[^0-9\u4e00-\u9fff，。！？；：、（）《》【】“”‘’—…·\\s]+", "", cleaned)
+    cleaned = re.sub(r"[\x00-\x1f\x7f]", " ", text)
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned.strip()
 
@@ -589,6 +606,8 @@ def _synthesize_segments(segments: List[Dict], segment_dir: Path, tts_cfg: Dict)
         return _synthesize_segments_sherpa_onnx(segments, segment_dir, tts_cfg)
     if provider == "kokoro":
         return _synthesize_segments_kokoro(segments, segment_dir, tts_cfg)
+    if provider == "voxcpm_onnx":
+        return _synthesize_segments_voxcpm_onnx(segments, segment_dir, tts_cfg)
 
     if _is_hf_space_endpoint(endpoint, provider):
         audio_segments, durations = _synthesize_segments_hf_space(segments, segment_dir, endpoint)
@@ -632,6 +651,162 @@ def _synthesize_segments_http(
             durations.append(_probe_duration(segment_path))
         except Exception:
             continue
+
+    return audio_segments, durations
+
+
+def _synthesize_segments_voxcpm_onnx(
+    segments: List[Dict],
+    segment_dir: Path,
+    tts_cfg: Dict,
+) -> Tuple[List[Path], List[float]]:
+    voxcpm_cfg = tts_cfg.get("VOXCPM", {})
+
+    repo_dir_raw = (voxcpm_cfg.get("REPO_DIR") or "").strip()
+    infer_path_raw = (voxcpm_cfg.get("INFER_PATH") or "").strip()
+
+    def _abs_path(path: Path) -> Path:
+        if path.is_absolute():
+            return path
+        return (Path.cwd() / path).resolve()
+
+    if infer_path_raw:
+        infer_path = _abs_path(Path(infer_path_raw))
+        base_dir = infer_path.parent
+    elif repo_dir_raw:
+        base_dir = _abs_path(Path(repo_dir_raw))
+        infer_path = base_dir / "infer.py"
+    else:
+        print("[音频播报] 未配置 VoxCPM repo/infer.py，跳过 TTS")
+        return [], []
+
+    if not infer_path.is_file():
+        print(f"[音频播报] VoxCPM infer.py 不存在: {infer_path}")
+        return [], []
+
+    def _resolve_path(value: str, default_rel: str) -> Path:
+        if value:
+            return _abs_path(Path(value))
+        return base_dir / default_rel
+
+    models_dir = _resolve_path((voxcpm_cfg.get("MODELS_DIR") or "").strip(), "models/onnx_models_quantized")
+    voxcpm_dir = _resolve_path((voxcpm_cfg.get("VOXCPM_DIR") or "").strip(), "models/VoxCPM1.5")
+    voices_file = _resolve_path((voxcpm_cfg.get("VOICES_FILE") or "").strip(), "voices.json")
+
+    voice = (voxcpm_cfg.get("VOICE") or "").strip()
+    if not voice:
+        print("[音频播报] 未配置 VoxCPM voice，跳过 TTS")
+        return [], []
+
+    if not models_dir.is_dir():
+        print(f"[音频播报] VoxCPM models_dir 不存在: {models_dir}")
+        return [], []
+    if not voxcpm_dir.is_dir():
+        print(f"[音频播报] VoxCPM voxcpm_dir 不存在: {voxcpm_dir}")
+        return [], []
+    if not voices_file.is_file():
+        print(f"[音频播报] VoxCPM voices_file 不存在: {voices_file}")
+        return [], []
+
+    max_threads = voxcpm_cfg.get("MAX_THREADS")
+    text_normalizer = voxcpm_cfg.get("TEXT_NORMALIZER", True)
+    audio_normalizer = voxcpm_cfg.get("AUDIO_NORMALIZER", False)
+    cfg_value = voxcpm_cfg.get("CFG_VALUE")
+    fixed_timesteps = voxcpm_cfg.get("FIXED_TIMESTEPS")
+    seed = voxcpm_cfg.get("SEED")
+    batch_mode = voxcpm_cfg.get("BATCH_MODE", True)
+
+    base_config: Dict[str, object] = {
+        "models_dir": str(models_dir),
+        "voxcpm_dir": str(voxcpm_dir),
+        "voices_file": str(voices_file),
+        "voice": voice,
+        "prompt_audio": None,
+        "prompt_text": None,
+        "text_normalizer": bool(text_normalizer),
+        "audio_normalizer": bool(audio_normalizer),
+    }
+
+    if max_threads is not None:
+        try:
+            base_config["max_threads"] = int(max_threads)
+        except (TypeError, ValueError):
+            pass
+    if cfg_value is not None:
+        try:
+            base_config["cfg_value"] = float(cfg_value)
+        except (TypeError, ValueError):
+            pass
+    if fixed_timesteps is not None:
+        try:
+            base_config["fixed_timesteps"] = int(fixed_timesteps)
+        except (TypeError, ValueError):
+            pass
+    if seed is not None:
+        try:
+            base_config["seed"] = int(seed)
+        except (TypeError, ValueError):
+            pass
+
+    if batch_mode:
+        texts = [segment.get("text", "").strip() for segment in segments if segment.get("text", "").strip()]
+        if not texts:
+            return [], []
+        output_path = segment_dir / "voxcpm_batch.wav"
+        config_path = segment_dir / "voxcpm_batch.json"
+        run_config = dict(base_config)
+        run_config["text"] = texts
+        run_config["output"] = str(output_path)
+        config_path.write_text(
+            json.dumps(run_config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(infer_path), "--config", str(config_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            detail = stderr or stdout or "unknown error"
+            print(f"[音频播报] VoxCPM TTS 失败: {detail}")
+            return [], []
+
+        return [output_path], _estimate_durations(segments)
+
+    audio_segments: List[Path] = []
+    durations: List[float] = []
+
+    for idx, segment in enumerate(segments):
+        text = segment.get("text", "").strip()
+        if not text:
+            continue
+        segment_path = segment_dir / f"segment_{idx:03d}.wav"
+        config_path = segment_dir / f"voxcpm_config_{idx:03d}.json"
+        run_config = dict(base_config)
+        run_config["text"] = text
+        run_config["output"] = str(segment_path)
+        config_path.write_text(
+            json.dumps(run_config, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [sys.executable, str(infer_path), "--config", str(config_path)],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            stdout = result.stdout.strip()
+            detail = stderr or stdout or "unknown error"
+            print(f"[音频播报] VoxCPM TTS 失败: {detail}")
+            continue
+
+        audio_segments.append(segment_path)
+        durations.append(_probe_duration(segment_path))
 
     return audio_segments, durations
 

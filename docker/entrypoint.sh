@@ -45,6 +45,12 @@ PY
     fi
 fi
 
+if [ "${AUTO_DOWNLOAD_VOXCPM_ONNX:-true}" = "true" ] || [ "${AUTO_DOWNLOAD_VOXCPM_MODEL:-true}" = "true" ]; then
+    if ! /usr/local/bin/python /app/tools/ensure_voxcpm_assets.py; then
+        echo "⚠️  VoxCPM 资源检查失败，继续运行（音频可能不可用）"
+    fi
+fi
+
 case "${RUN_MODE:-cron}" in
 "once")
     echo "🔄 单次执行"
