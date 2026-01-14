@@ -283,7 +283,7 @@ def maybe_generate_audio(report_data: Dict, config: Dict) -> Optional[AudioResul
             print("[音频播报] 摘要生成失败，跳过")
             return None
 
-        segments = _build_script_segments(summaries, config)
+        segments = _build_script_segments(summaries, audio_cfg)
         if not segments:
             print("[音频播报] 音频脚本为空，跳过")
             return None
@@ -720,11 +720,14 @@ def _sanitize_chinese_text(text: str) -> str:
     return cleaned.strip()
 
 
-def _build_script_segments(summaries: List[Dict], config: Dict) -> List[Dict]:
+def _build_script_segments(summaries: List[Dict], audio_cfg: Dict) -> List[Dict]:
     if not summaries:
         return []
 
     summaries_sorted = sorted(summaries, key=lambda s: s.get("priority_score", 0), reverse=True)
+    max_segments = _coerce_positive_int(audio_cfg.get("MAX_SEGMENTS"), 0)
+    if max_segments and len(summaries_sorted) > max_segments:
+        summaries_sorted = summaries_sorted[:max_segments]
     high_count = max(1, math.ceil(len(summaries_sorted) * 0.3))
 
     segments = []
@@ -937,30 +940,44 @@ def _synthesize_segments_voxcpm_onnx(
         texts = [segment.get("text", "").strip() for segment in segments if segment.get("text", "").strip()]
         if not texts:
             return [], []
-        output_path = segment_dir / "voxcpm_batch.wav"
-        config_path = segment_dir / "voxcpm_batch.json"
-        run_config = dict(base_config)
-        run_config["text"] = texts
-        run_config["output"] = str(output_path)
-        config_path.write_text(
-            json.dumps(run_config, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
 
-        heartbeat.force(f"voxcpm batch {len(texts)} segments")
-        result = _run_subprocess_with_heartbeat(
-            [sys.executable, str(infer_path), "--config", str(config_path)],
-            "voxcpm batch",
-            heartbeat,
-        )
-        if result.returncode != 0:
-            stderr = result.stderr.strip()
-            stdout = result.stdout.strip()
-            detail = stderr or stdout or "unknown error"
-            print(f"[音频播报] VoxCPM TTS 失败: {detail}")
+        batch_size = voxcpm_cfg.get("BATCH_SIZE", 5)
+        total_texts = len(texts)
+        all_outputs: List[Path] = []
+
+        for chunk_idx, i in enumerate(range(0, total_texts, batch_size)):
+            chunk_texts = texts[i:i + batch_size]
+            chunk_end = min(i + batch_size, total_texts)
+
+            output_path = segment_dir / f"voxcpm_batch_{chunk_idx:03d}.wav"
+            config_path = segment_dir / f"voxcpm_batch_{chunk_idx:03d}.json"
+            run_config = dict(base_config)
+            run_config["text"] = chunk_texts
+            run_config["output"] = str(output_path)
+            config_path.write_text(
+                json.dumps(run_config, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            heartbeat.force(f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}")
+            result = _run_subprocess_with_heartbeat(
+                [sys.executable, str(infer_path), "--config", str(config_path)],
+                f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}",
+                heartbeat,
+            )
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                stdout = result.stdout.strip()
+                detail = stderr or stdout or "unknown error"
+                print(f"[音频播报] VoxCPM TTS chunk {chunk_idx} 失败: {detail}")
+                continue
+
+            all_outputs.append(output_path)
+
+        if not all_outputs:
             return [], []
 
-        return [output_path], _estimate_durations(segments)
+        return all_outputs, _estimate_durations(segments)
 
     audio_segments: List[Path] = []
     durations: List[float] = []

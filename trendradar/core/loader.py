@@ -232,6 +232,14 @@ def _load_audio_config(config_data: Dict) -> Dict:
         except ValueError:
             interval_env = None
     fetch_timeout_env = _get_env_int("AUDIO_FETCH_TIMEOUT_SECONDS")
+    max_segments_env_raw = os.environ.get("AUDIO_MAX_SEGMENTS", "").strip()
+    if max_segments_env_raw == "":
+        max_segments_env = None
+    else:
+        try:
+            max_segments_env = int(max_segments_env_raw)
+        except ValueError:
+            max_segments_env = None
     fetch_max_bytes_env = _get_env_int("AUDIO_FETCH_MAX_BYTES")
     embedding_model_env = _get_env_str("AUDIO_EMBEDDING_MODEL")
     embedding_sim_env = os.environ.get("AUDIO_EMBEDDING_SIM_THRESHOLD", "").strip()
@@ -258,6 +266,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
     voxcpm_fixed_env = _get_env_int("VOXCPM_FIXED_TIMESTEPS")
     voxcpm_seed_env = _get_env_int("VOXCPM_SEED")
     voxcpm_batch_env = _get_env_bool("VOXCPM_BATCH_MODE")
+    voxcpm_batch_size_env = _get_env_int("VOXCPM_BATCH_SIZE")
 
     def _parse_float(value: str, default: float) -> float:
         try:
@@ -270,6 +279,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
         "INTERVAL_HOURS": audio.get("interval_hours", 12) if interval_env is None else interval_env,
         "FETCH_TIMEOUT_SECONDS": fetch_timeout_env or audio.get("fetch_timeout_seconds", 5),
         "FETCH_MAX_BYTES": fetch_max_bytes_env or audio.get("fetch_max_bytes", 0),
+        "MAX_SEGMENTS": audio.get("max_segments", 0) if max_segments_env is None else max_segments_env,
         "EMBEDDING_MODEL": embedding_model_env or audio.get("embedding_model", "intfloat/multilingual-e5-small"),
         "EMBEDDING_SIM_THRESHOLD": _parse_float(embedding_sim_env, audio.get("embedding_sim_threshold", 0.82)),
         "FUZZY_SIM_THRESHOLD": _parse_float(fuzzy_sim_env, audio.get("fuzzy_sim_threshold", 90)),
@@ -298,6 +308,7 @@ def _load_audio_config(config_data: Dict) -> Dict:
                 "FIXED_TIMESTEPS": voxcpm_fixed_env or voxcpm.get("fixed_timesteps", 10),
                 "SEED": voxcpm_seed_env or voxcpm.get("seed", 1),
                 "BATCH_MODE": voxcpm_batch_env if voxcpm_batch_env is not None else voxcpm.get("batch_mode", True),
+                "BATCH_SIZE": voxcpm_batch_size_env if voxcpm_batch_size_env is not None else voxcpm.get("batch_size", 5),
             },
             "KOKORO": {
                 "LANG_CODE": _get_env_str("KOKORO_LANG_CODE") or kokoro.get("lang_code", "z"),
