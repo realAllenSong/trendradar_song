@@ -103,6 +103,7 @@ jobs:
       - name: Ensure VoxCPM assets
         if: success()
         env:
+          CONFIG_PATH: config/config.yaml
           VOXCPM_ONNX_REPO: Oulasong/voxcpm-onnx
           VOXCPM_MODEL_REPO: openbmb/VoxCPM1.5
         run: |
