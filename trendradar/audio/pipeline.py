@@ -202,14 +202,43 @@ def _build_tts_session(tts_cfg: Dict) -> requests.Session:
     return session
 
 
-def _run_subprocess_with_heartbeat(cmd: List[str], label: str, heartbeat: Heartbeat) -> subprocess.CompletedProcess:
+def _run_subprocess_with_heartbeat(cmd: List[str], label: str, heartbeat: Heartbeat, timeout: Optional[int] = None) -> subprocess.CompletedProcess:
+    """Run subprocess with heartbeat monitoring and optional timeout.
+    
+    Args:
+        cmd: Command to execute
+        label: Label for heartbeat messages
+        heartbeat: Heartbeat instance for progress tracking
+        timeout: Optional timeout in seconds. If exceeded, process is terminated.
+    
+    Returns:
+        CompletedProcess with returncode, stdout, stderr
+    """
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    start_time = time.time()
+    
     while True:
         result = process.poll()
         if result is not None:
             break
+        
+        # Check timeout
+        if timeout is not None:
+            elapsed = time.time() - start_time
+            if elapsed > timeout:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+                stdout, stderr = process.communicate()
+                error_msg = f"Process timed out after {timeout}s (elapsed: {elapsed:.1f}s)"
+                return subprocess.CompletedProcess(cmd, -1, stdout, f"{stderr}\n{error_msg}")
+        
         heartbeat.maybe_emit(f"{label} running")
         time.sleep(1)
+    
     stdout, stderr = process.communicate()
     return subprocess.CompletedProcess(cmd, process.returncode, stdout, stderr)
 
@@ -962,10 +991,13 @@ def _synthesize_segments_voxcpm_onnx(
             )
 
             heartbeat.force(f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}")
+            # Timeout: 180s per batch (30s per segment * 5-10 segments + overhead)
+            batch_timeout = max(180, batch_size * 30)
             result = _run_subprocess_with_heartbeat(
                 [sys.executable, str(infer_path), "--config", str(config_path)],
                 f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}",
                 heartbeat,
+                timeout=batch_timeout,
             )
             if result.returncode != 0:
                 stderr = result.stderr.strip()

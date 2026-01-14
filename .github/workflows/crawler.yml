@@ -276,6 +276,9 @@ jobs:
           AUDIO_TTS_EVENT_TIMEOUT_SECONDS: "240"
           AUDIO_TTS_MAX_RETRIES: "3"
           AUDIO_TTS_RETRY_BACKOFF_SECONDS: "2"
+          AUDIO_MAX_SEGMENTS: "15"
+          VOXCPM_BATCH_SIZE: "5"
+          VOXCPM_MAX_THREADS: "0"
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           INDEXTTS_ENDPOINT: ${{ secrets.INDEXTTS_ENDPOINT }}
           INDEXTTS_API_KEY: ${{ secrets.INDEXTTS_API_KEY }}
