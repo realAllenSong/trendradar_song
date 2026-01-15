@@ -991,8 +991,14 @@ def _synthesize_segments_voxcpm_onnx(
             )
 
             heartbeat.force(f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}")
-            # Timeout: 300s base or 150s per segment (extended warm-up buffer for initial batches)
-            batch_timeout = max(300, batch_size * 150)
+            # Dynamic timeout: first batches need more time for model initialization
+            # chunk 0-1: 450s (warm-up), chunk 2-3: 360s (transition), rest: 300s
+            if chunk_idx <= 1:
+                batch_timeout = 450  # First 2 batches: extreme warm-up overhead
+            elif chunk_idx <= 3:
+                batch_timeout = 360  # Next 2 batches: transition period
+            else:
+                batch_timeout = 300  # Steady-state batches
             result = _run_subprocess_with_heartbeat(
                 [sys.executable, str(infer_path), "--config", str(config_path)],
                 f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}",
@@ -1011,7 +1017,17 @@ def _synthesize_segments_voxcpm_onnx(
         if not all_outputs:
             return [], []
 
-        return all_outputs, _estimate_durations(segments)
+        # Probe actual durations from generated audio files
+        actual_durations = []
+        for output_path in all_outputs:
+            duration = _probe_duration(output_path)
+            if duration > 0:
+                actual_durations.append(duration)
+            else:
+                # Fallback to estimation if probe fails
+                actual_durations.append(max(2.0, len(texts[len(actual_durations)]) / 6.0))
+        
+        return all_outputs, actual_durations
 
     audio_segments: List[Path] = []
     durations: List[float] = []
@@ -1611,5 +1627,7 @@ def _build_chapters(segments: List[Dict], durations: List[float]) -> List[Dict]:
 
 
 def _write_chapters(chapters: List[Dict], path: Path) -> None:
+    # Filter out invalid chapters (check for 'start' field, not 'startTime')
+    valid_chapters = [c for c in chapters if c.get("start") is not None]
     with open(path, "w", encoding="utf-8") as handle:
-        json.dump(chapters, handle, ensure_ascii=False)
+        json.dump(valid_chapters, handle, ensure_ascii=False, indent=2)
