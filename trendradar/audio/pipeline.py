@@ -989,15 +989,17 @@ def _synthesize_segments_voxcpm_onnx(
 
         # Process texts with adaptive batch sizing
         while text_idx < total_texts:
-            # Strategy: First 5 batches use size=1 to ensure gradual warm-up
-            # VoxCPM has very long warm-up phase on GitHub runners (>6 minutes)
-            # After 5 single-segment batches, system is fully warmed up
-            if chunk_idx <= 4:
-                batch_size = 1  # Warm-up: single segment per batch for first 5 batches
-                batch_timeout = 420  # 7 minutes timeout for worst-case warm-up
+            # Full precision ONNX models are MUCH slower than quantized (~2-3x)
+            # Strategy: First 7 batches use size=1 to ensure complete warm-up
+            # Batch 0: Model loading (60-90s)
+            # Batch 1-6: ONNX session + tokenizer warm-up (can take 6-8 minutes each on full precision)
+            # Batch 7+: Steady state with size=2
+            if chunk_idx <= 6:
+                batch_size = 1  # Warm-up: single segment per batch for first 7 batches
+                batch_timeout = 540  # 9 minutes timeout for full precision warm-up
             else:
                 batch_size = base_batch_size  # Steady state: use configured size (2)
-                batch_timeout = 300  # Standard timeout (validated at 240-280s)
+                batch_timeout = 360  # 6 minutes timeout for steady-state full precision
             
             chunk_texts = texts[text_idx:text_idx + batch_size]
             chunk_end = min(text_idx + batch_size, total_texts)
