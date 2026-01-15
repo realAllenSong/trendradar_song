@@ -111,7 +111,16 @@ def _download_hf_snapshot(repo_id: str, target_dir: Path, revision: str | None) 
         print(f"[VoxCPM] huggingface_hub unavailable: {exc}")
         return False
 
-    allow_patterns = ["*.onnx", "*.onnx.data", "voxcpm_onnx_config.json"]
+    # Determine which HF directory to download based on target directory name
+    target_name = target_dir.name
+    if "quantized" in target_name.lower():
+        hf_subdir = "onnx_models_quantized"
+    else:
+        hf_subdir = "onnx_models"
+    
+    print(f"[VoxCPM] Downloading from HF subdirectory: {hf_subdir}")
+    allow_patterns = [f"{hf_subdir}/*.onnx", f"{hf_subdir}/*.onnx.data", f"{hf_subdir}/voxcpm_onnx_config.json"]
+    
     try:
         snapshot_download(
             repo_id=repo_id,
