@@ -216,6 +216,7 @@ def _run_subprocess_with_heartbeat(cmd: List[str], label: str, heartbeat: Heartb
     """
     process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     start_time = time.time()
+    last_heartbeat = start_time
     
     while True:
         result = process.poll()
@@ -223,8 +224,9 @@ def _run_subprocess_with_heartbeat(cmd: List[str], label: str, heartbeat: Heartb
             break
         
         # Check timeout
+        current_time = time.time()
+        elapsed = current_time - start_time
         if timeout is not None:
-            elapsed = time.time() - start_time
             if elapsed > timeout:
                 process.terminate()
                 try:
@@ -236,7 +238,13 @@ def _run_subprocess_with_heartbeat(cmd: List[str], label: str, heartbeat: Heartb
                 error_msg = f"Process timed out after {timeout}s (elapsed: {elapsed:.1f}s)"
                 return subprocess.CompletedProcess(cmd, -1, stdout, f"{stderr}\n{error_msg}")
         
-        heartbeat.maybe_emit(f"{label} running")
+        # Emit heartbeat every 30s with elapsed time (more frequent for GitHub runner)
+        if current_time - last_heartbeat >= 30:
+            minutes = int(elapsed // 60)
+            seconds = int(elapsed % 60)
+            heartbeat.force(f"{label} running ({minutes}m{seconds}s elapsed)")
+            last_heartbeat = current_time
+        
         time.sleep(1)
     
     stdout, stderr = process.communicate()

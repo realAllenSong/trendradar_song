@@ -170,7 +170,7 @@ audio:
     format: "mp3"
     voxcpm:
       repo_dir: "models/ONNX_Lab"
-      models_dir: "models/ONNX_Lab/models/onnx_models_quantized"
+      models_dir: "models/ONNX_Lab/models/onnx_models"  # Use full precision (not quantized)
       voxcpm_dir: "models/ONNX_Lab/models/VoxCPM1.5"
       voices_file: "models/ONNX_Lab/voices.json"
       voice: "context_zh_a_share_market_news"
