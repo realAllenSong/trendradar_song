@@ -992,7 +992,7 @@ def _synthesize_segments_voxcpm_onnx(
 
             heartbeat.force(f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}")
             # Timeout: 300s base or 150s per segment (extended warm-up buffer for initial batches)
-            batch_timeout = max(1000, batch_size * 150)
+            batch_timeout = max(700, batch_size * 150)
             result = _run_subprocess_with_heartbeat(
                 [sys.executable, str(infer_path), "--config", str(config_path)],
                 f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}",
