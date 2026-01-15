@@ -231,6 +231,15 @@ jobs:
           python-version: "3.10"
           cache: "pip"
 
+      - name: Free up disk space
+        run: |
+          echo "Before cleanup:"
+          df -h
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/share/boost || true
+          sudo apt-get clean
+          echo "After cleanup:"
+          df -h
+
       - name: System dependencies
         run: |
           sudo apt-get update
@@ -249,13 +258,9 @@ jobs:
           du -sh ~/.cache/pip || true
           free -h
 
-      - name: Install torch (CPU)
-        run: |
-          python -m pip install -U pip setuptools wheel
-          pip install --extra-index-url https://download.pytorch.org/whl/cpu torch==2.2.2
-
       - name: Install requirements (verbose)
         run: |
+          python -m pip install -U pip setuptools wheel
           pip install -r requirements.txt -v
 
       - name: Ensure VoxCPM assets
@@ -312,17 +317,9 @@ jobs:
             exit 1
           fi
 
-          # Stash any unstaged changes to avoid rebase conflicts
-          git add -A
-          if ! git diff --cached --quiet; then
-            git stash --include-untracked
-          fi
-
-          git add audio/latest.mp3 audio/chapters.json audio/transcript.txt
-
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
+          # Stash any unstaged changes BEFORE adding audio files
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "Stashing uncommitted changes"
           fi
 
           git config user.name "github-actions[bot]"
