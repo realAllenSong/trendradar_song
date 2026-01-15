@@ -981,15 +981,14 @@ def _synthesize_segments_voxcpm_onnx(
 
         # Process texts with adaptive batch sizing
         while text_idx < total_texts:
-            # First batch: size=1 (extreme warm-up overhead)
-            # Second batch: size=1 (transition)
-            # Rest: use configured batch_size
-            if chunk_idx == 0:
-                batch_size = 1  # First batch: single segment for fastest warm-up
-            elif chunk_idx == 1:
-                batch_size = 1  # Second batch: still warming up
+            # First 3 batches: size=1 with extended timeout (warm-up phase)
+            # Rest: use configured batch_size with standard timeout (steady-state)
+            if chunk_idx <= 2:
+                batch_size = 1  # Warm-up: single segment per batch
+                batch_timeout = 360  # Extended timeout for cold start overhead
             else:
                 batch_size = base_batch_size  # Steady state: use configured size
+                batch_timeout = 300  # Standard timeout (validated at 240-280s)
             
             chunk_texts = texts[text_idx:text_idx + batch_size]
             chunk_end = min(text_idx + batch_size, total_texts)
@@ -1005,10 +1004,6 @@ def _synthesize_segments_voxcpm_onnx(
             )
 
             heartbeat.force(f"voxcpm batch {text_idx + 1}-{chunk_end}/{total_texts}")
-            # Dynamic timeout based on batch position
-            # First 2 batches (size=1): 300s (warm-up with single segment)
-            # Rest (size=2): 300s (already validated as sufficient)
-            batch_timeout = 300
             result = _run_subprocess_with_heartbeat(
                 [sys.executable, str(infer_path), "--config", str(config_path)],
                 f"voxcpm batch {text_idx + 1}-{chunk_end}/{total_texts}",
