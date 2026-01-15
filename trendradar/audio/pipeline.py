@@ -970,15 +970,29 @@ def _synthesize_segments_voxcpm_onnx(
         if not texts:
             return [], []
 
-        batch_size = voxcpm_cfg.get("BATCH_SIZE", 10)
-        if batch_size <= 0:
-            batch_size = 10  # Fallback to default if invalid
+        base_batch_size = voxcpm_cfg.get("BATCH_SIZE", 10)
+        if base_batch_size <= 0:
+            base_batch_size = 10  # Fallback to default if invalid
+        
         total_texts = len(texts)
         all_outputs: List[Path] = []
+        text_idx = 0
+        chunk_idx = 0
 
-        for chunk_idx, i in enumerate(range(0, total_texts, batch_size)):
-            chunk_texts = texts[i:i + batch_size]
-            chunk_end = min(i + batch_size, total_texts)
+        # Process texts with adaptive batch sizing
+        while text_idx < total_texts:
+            # First batch: size=1 (extreme warm-up overhead)
+            # Second batch: size=1 (transition)
+            # Rest: use configured batch_size
+            if chunk_idx == 0:
+                batch_size = 1  # First batch: single segment for fastest warm-up
+            elif chunk_idx == 1:
+                batch_size = 1  # Second batch: still warming up
+            else:
+                batch_size = base_batch_size  # Steady state: use configured size
+            
+            chunk_texts = texts[text_idx:text_idx + batch_size]
+            chunk_end = min(text_idx + batch_size, total_texts)
 
             output_path = segment_dir / f"voxcpm_batch_{chunk_idx:03d}.wav"
             config_path = segment_dir / f"voxcpm_batch_{chunk_idx:03d}.json"
@@ -990,18 +1004,14 @@ def _synthesize_segments_voxcpm_onnx(
                 encoding="utf-8",
             )
 
-            heartbeat.force(f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}")
-            # Dynamic timeout: first batches need more time for model initialization
-            # chunk 0-1: 450s (warm-up), chunk 2-3: 360s (transition), rest: 300s
-            if chunk_idx <= 1:
-                batch_timeout = 450  # First 2 batches: extreme warm-up overhead
-            elif chunk_idx <= 3:
-                batch_timeout = 360  # Next 2 batches: transition period
-            else:
-                batch_timeout = 300  # Steady-state batches
+            heartbeat.force(f"voxcpm batch {text_idx + 1}-{chunk_end}/{total_texts}")
+            # Dynamic timeout based on batch position
+            # First 2 batches (size=1): 300s (warm-up with single segment)
+            # Rest (size=2): 300s (already validated as sufficient)
+            batch_timeout = 300
             result = _run_subprocess_with_heartbeat(
                 [sys.executable, str(infer_path), "--config", str(config_path)],
-                f"voxcpm batch {i + 1}-{chunk_end}/{total_texts}",
+                f"voxcpm batch {text_idx + 1}-{chunk_end}/{total_texts}",
                 heartbeat,
                 timeout=batch_timeout,
             )
@@ -1010,9 +1020,21 @@ def _synthesize_segments_voxcpm_onnx(
                 stdout = result.stdout.strip()
                 detail = stderr or stdout or "unknown error"
                 print(f"[音频播报] VoxCPM TTS chunk {chunk_idx} 失败: {detail}")
+                text_idx += batch_size
+                chunk_idx += 1
+                # Force garbage collection after failed batch to free memory
+                import gc
+                gc.collect()
                 continue
 
             all_outputs.append(output_path)
+            text_idx += batch_size
+            chunk_idx += 1
+            
+            # Force garbage collection after each batch to prevent OOM
+            # Especially important for first 2 batches (warm-up phase)
+            import gc
+            gc.collect()
 
         if not all_outputs:
             return [], []
