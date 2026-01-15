@@ -981,13 +981,14 @@ def _synthesize_segments_voxcpm_onnx(
 
         # Process texts with adaptive batch sizing
         while text_idx < total_texts:
-            # First 3 batches: size=1 with extended timeout (warm-up phase)
-            # Rest: use configured batch_size with standard timeout (steady-state)
-            if chunk_idx <= 2:
-                batch_size = 1  # Warm-up: single segment per batch
-                batch_timeout = 360  # Extended timeout for cold start overhead
+            # Strategy: First 5 batches use size=1 to ensure gradual warm-up
+            # VoxCPM has very long warm-up phase on GitHub runners (>6 minutes)
+            # After 5 single-segment batches, system is fully warmed up
+            if chunk_idx <= 4:
+                batch_size = 1  # Warm-up: single segment per batch for first 5 batches
+                batch_timeout = 420  # 7 minutes timeout for worst-case warm-up
             else:
-                batch_size = base_batch_size  # Steady state: use configured size
+                batch_size = base_batch_size  # Steady state: use configured size (2)
                 batch_timeout = 300  # Standard timeout (validated at 240-280s)
             
             chunk_texts = texts[text_idx:text_idx + batch_size]
