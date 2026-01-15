@@ -312,6 +312,12 @@ jobs:
             exit 1
           fi
 
+          # Stash any unstaged changes to avoid rebase conflicts
+          git add -A
+          if ! git diff --cached --quiet; then
+            git stash --include-untracked
+          fi
+
           git add audio/latest.mp3 audio/chapters.json audio/transcript.txt
 
           if git diff --cached --quiet; then
