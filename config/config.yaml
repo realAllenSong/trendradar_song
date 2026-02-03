@@ -143,7 +143,7 @@ audio:
   embedding_model: "intfloat/multilingual-e5-small"
   embedding_sim_threshold: 0.82
   fuzzy_sim_threshold: 90
-  gemini_model: "gemini-3-flash-preview"
+  gemini_model: "gemini-2.5-flash-lite"
   gemini_api_key: ""   # 也可用环境变量 GEMINI_API_KEY
   dedupe_enabled: true
   dedupe_prompt: |
